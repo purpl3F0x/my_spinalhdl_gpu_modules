@@ -104,8 +104,11 @@ class AxiTileDma(
     // 3. Tiled RAM (BRAM) Read Port (Operates in high-frequency ramClock domain)
     val tile_ram = master(TileRamReadPort(config.ramByteAddrWidth, config.dataWidth))
 
-    // 4. Interrupt Output (AXI clock domain)
-    val irq = out Bool ()
+    // 4. Interrupt Outputs (AXI clock domain)
+    val irq            = out Bool ()
+    val irq_done       = out Bool ()
+    val irq_error      = out Bool ()
+    val irq_frame_done = out Bool ()
   }
 
   // Clear top-level "io_" prefix for clean Verilog / EDA naming
@@ -167,6 +170,16 @@ class AxiTileDma(
   )
   ramClock.reset.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 ram_resetn RST")
   ramClock.reset.addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
+
+  // Vivado Interrupt interface attributes
+  io.irq.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:interrupt:1.0 irq INTERRUPT")
+  io.irq.addAttribute("X_INTERFACE_PARAMETER", "SENSITIVITY LEVEL_HIGH")
+  io.irq_done.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:interrupt:1.0 irq_done INTERRUPT")
+  io.irq_done.addAttribute("X_INTERFACE_PARAMETER", "SENSITIVITY LEVEL_HIGH")
+  io.irq_error.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:interrupt:1.0 irq_error INTERRUPT")
+  io.irq_error.addAttribute("X_INTERFACE_PARAMETER", "SENSITIVITY LEVEL_HIGH")
+  io.irq_frame_done.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:interrupt:1.0 irq_frame_done INTERRUPT")
+  io.irq_frame_done.addAttribute("X_INTERFACE_PARAMETER", "SENSITIVITY LEVEL_HIGH")
 
   // ===========================================================================
   // AXI CLOCK DOMAIN LOGIC
@@ -238,6 +251,31 @@ class AxiTileDma(
   val REG_PERF      = busif.newRegAt(address = 0x24, doc = "Performance Cycle Counter")
   val PERF_CYCLES   = REG_PERF.field(UInt(32 bits), RO, doc = "Elapsed clock cycles during active tile transfer")
   PERF_CYCLES := cycleCounter
+
+  // ===========================================================================
+  // INTERRUPT FACTORY REGISTERS (0x40 - 0x4C)
+  // RegGroup RFMS4:
+  //   0x40: INTR_INT_RAW    - Raw interrupt event flags (W1C: write 1 to clear)
+  //   0x44: INTR_INT_FORCE  - Software debug force (W1S: write 1 to trigger raw)
+  //   0x48: INTR_INT_MASK   - Mask register (RW: 1 = masked/off, 0 = unmasked/open)
+  //   0x4C: INTR_INT_STATUS - Masked status register (RO: raw && !mask)
+  // Fields:
+  //   Bit 0: done           - Tile transfer complete
+  //   Bit 1: error          - AXI bus write error (SLVERR/DECERR)
+  //   Bit 2: frame_done     - Final tile of frame complete (Auto-Advance wrap)
+  // ===========================================================================
+  val intrDone      = False
+  val intrError     = False
+  val intrFrameDone = False
+
+  val INTR = busif.newIntrRFMS4(addr = 0x40, doc = "DMA Interrupt Controller")
+  val irqDoneStat      = INTR.fieldAt(0, intrDone,      maskRstVal = 0, doc = "Tile done interrupt (1: unmasked/open)")(SymbolName("done"))
+  val irqErrorStat     = INTR.fieldAt(1, intrError,     maskRstVal = 0, doc = "Error interrupt (1: unmasked/open)")(SymbolName("error"))
+  val irqFrameDoneStat = if (config.useAutoAdvance) {
+    INTR.fieldAt(2, intrFrameDone, maskRstVal = 0, doc = "Frame done interrupt (1: unmasked/open)")(SymbolName("frame_done"))
+  } else null
+
+  val irqMerged = INTR.intr()
 
   // Built-in Documentation & Header Generators (exported to targetDirectory)
   busif.accept(HtmlGenerator("axi_tile_dma_regmap", "AXI_TILE_DMA"))
@@ -460,6 +498,7 @@ class AxiTileDma(
   when(bFire) {
     when(io.m_axi.b.resp === Axi4.resp.SLVERR || io.m_axi.b.resp === Axi4.resp.DECERR) {
       ERROR := True
+      intrError := True
       brespVal := io.m_axi.b.resp
     }
   }
@@ -564,6 +603,7 @@ class AxiTileDma(
         when(outstandingBursts === 0) {
           dmaBusy := False
           TILE_DONE := True
+          intrDone := True
           when(IRQ_ENABLE) {
             IRQ_STATUS := True
           }
@@ -600,6 +640,7 @@ class AxiTileDma(
             tileOriginAddr := fullBaseAddr
             rowStartTileAddr := fullBaseAddr
             FRAME_DONE := True
+            intrFrameDone := True
           }.elsewhen(advIsLastInRow) {
             // Wrap down to the next tile row
             CUR_TILE_X := 0
@@ -619,7 +660,15 @@ class AxiTileDma(
     }
   }
 
-  io.irq := IRQ_STATUS
+  // Discrete status & interrupt outputs
+  io.irq            := irqMerged
+  io.irq_done       := INTR.RAW.readBits(0)
+  io.irq_error      := INTR.RAW.readBits(1)
+  io.irq_frame_done := (if (config.useAutoAdvance) INTR.RAW.readBits(2) else False)
+
+  when(IRQ_ENABLE && (intrDone || intrError || intrFrameDone)) {
+    IRQ_STATUS := True
+  }
 }
 
 // =============================================================================
@@ -633,9 +682,12 @@ class AxiTileDmaWithRam(
   val ramClock = if (ramClockDomain != null) ramClockDomain else ClockDomain.external("ram", withReset = true)
 
   val io = new Bundle {
-    val s_axil_ctrl = slave(AxiLite4(config.getAxiLiteConfig))
-    val m_axi = master(Axi4WriteOnly(config.getAxi4Config))
-    val irq = out Bool ()
+    val s_axil_ctrl    = slave(AxiLite4(config.getAxiLiteConfig))
+    val m_axi          = master(Axi4WriteOnly(config.getAxi4Config))
+    val irq            = out Bool ()
+    val irq_done       = out Bool ()
+    val irq_error      = out Bool ()
+    val irq_frame_done = out Bool ()
 
     // External Write Port into Tiled RAM (Operates in high-frequency ramClock domain)
     val ram_wr_en = in Bool ()
@@ -668,7 +720,10 @@ class AxiTileDmaWithRam(
   val dma = new AxiTileDma(config, ramClockDomain = ramClock)
   dma.io.s_axil_ctrl <> io.s_axil_ctrl
   dma.io.m_axi <> io.m_axi
-  io.irq := dma.io.irq
+  io.irq            := dma.io.irq
+  io.irq_done       := dma.io.irq_done
+  io.irq_error      := dma.io.irq_error
+  io.irq_frame_done := dma.io.irq_frame_done
 
   // Dual-Port BRAM in high-frequency ramClock domain
   val ramArea = new ClockingArea(ramClock) {
