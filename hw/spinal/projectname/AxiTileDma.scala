@@ -12,11 +12,11 @@ import spinal.lib.fsm._
 // Tiled RAM (BRAM) Direct Read Port Interface (Operates in ramClock domain)
 // =============================================================================
 case class TileRamReadPort(addrWidth: Int, dataWidth: Int) extends Bundle with IMasterSlave {
-  val clk   = Bool()
-  val rst   = Bool()
-  val en    = Bool()
-  val addr  = UInt(addrWidth bits)
-  val dout  = Bits(dataWidth bits)
+  val clk = Bool()
+  val rst = Bool()
+  val en = Bool()
+  val addr = UInt(addrWidth bits)
+  val dout = Bits(dataWidth bits)
 
   override def asMaster(): Unit = {
     out(clk, rst, en, addr)
@@ -45,7 +45,10 @@ case class AxiTileDmaConfig(
   require(maxBurstLength >= 1 && maxBurstLength <= 256, "maxBurstLength must be between 1 and 256 beats")
   require(cdcDepth >= 8 && isPow2(cdcDepth), "cdcDepth must be a power of 2 >= 8")
   require(bramReadLatency >= 1, "bramReadLatency must be at least 1 clock cycle")
-  require(cdcDepth >= (bramReadLatency + 4), s"cdcDepth ($cdcDepth) must be >= bramReadLatency + 4 (${bramReadLatency + 4})")
+  require(
+    cdcDepth >= (bramReadLatency + 4),
+    s"cdcDepth ($cdcDepth) must be >= bramReadLatency + 4 (${bramReadLatency + 4})"
+  )
 
   val pixelBits: Int = 32
   val pixelBytes: Int = 4
@@ -105,9 +108,9 @@ class AxiTileDma(
     val tile_ram = master(TileRamReadPort(config.ramByteAddrWidth, config.dataWidth))
 
     // 4. Interrupt Outputs (AXI clock domain)
-    val irq            = out Bool ()
-    val irq_done       = out Bool ()
-    val irq_error      = out Bool ()
+    val irq = out Bool ()
+    val irq_done = out Bool ()
+    val irq_error = out Bool ()
     val irq_frame_done = out Bool ()
   }
 
@@ -197,59 +200,87 @@ class AxiTileDma(
   val cycleCounter = Reg(UInt(32 bits)) init (0)
 
   // 0x00: CONTROL
-  val REG_CTRL      = busif.newRegAt(address = 0x00, doc = "DMA Control Register")
-  val START         = REG_CTRL.field(Bool(), W1P, doc = "Trigger 128x128 tile transfer to DRAM")
-  val RESET_POS     = if (config.useAutoAdvance) REG_CTRL.field(Bool(), W1P, doc = "Reset tile coordinates (TileX=0, TileY=0)") else null
+  val REG_CTRL = busif.newRegAt(address = 0x00, doc = "DMA Control Register")
+  val START = REG_CTRL.field(Bool(), W1P, doc = "Trigger 128x128 tile transfer to DRAM")
+  val RESET_POS =
+    if (config.useAutoAdvance) REG_CTRL.field(Bool(), W1P, doc = "Reset tile coordinates (TileX=0, TileY=0)") else null
   if (!config.useAutoAdvance) REG_CTRL.reserved(1 bits)
-  val IRQ_ENABLE    = REG_CTRL.field(Bool(), RW, resetValue = 0, doc = "Interrupt enable on tile/frame completion")
-  val SOFT_RESET    = REG_CTRL.field(Bool(), W1P, doc = "Software reset for DMA FSM and internal pointers")
+  val IRQ_ENABLE = REG_CTRL.field(Bool(), RW, resetValue = 0, doc = "Interrupt enable on tile/frame completion")
+  val SOFT_RESET = REG_CTRL.field(Bool(), W1P, doc = "Software reset for DMA FSM and internal pointers")
 
   // 0x04: STATUS
-  val REG_STATUS    = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
-  val BUSY          = REG_STATUS.field(Bool(), RO, doc = "DMA active transfer busy flag")
-  val TILE_DONE     = REG_STATUS.field(Bool(), W1C, doc = "Tile transfer complete (Write 1 to clear)")
-  val FRAME_DONE    = if (config.useAutoAdvance) REG_STATUS.field(Bool(), W1C, doc = "Final tile of frame complete (Write 1 to clear)") else null
+  val REG_STATUS = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
+  val BUSY = REG_STATUS.field(Bool(), RO, doc = "DMA active transfer busy flag")
+  val TILE_DONE = REG_STATUS.field(Bool(), W1C, doc = "Tile transfer complete (Write 1 to clear)")
+  val FRAME_DONE =
+    if (config.useAutoAdvance) REG_STATUS.field(Bool(), W1C, doc = "Final tile of frame complete (Write 1 to clear)")
+    else null
   if (!config.useAutoAdvance) REG_STATUS.reserved(1 bits)
-  val ERROR         = REG_STATUS.field(Bool(), W1C, doc = "AXI bus write error (Write 1 to clear)")
-  val IRQ_STATUS    = REG_STATUS.field(Bool(), W1C, doc = "Interrupt request active (Write 1 to clear)")
-  val LAST_BRESP    = REG_STATUS.field(Bits(2 bits), RO, doc = "Last AXI write response status")
+  val ERROR = REG_STATUS.field(Bool(), W1C, doc = "AXI bus write error (Write 1 to clear)")
+  val IRQ_STATUS = REG_STATUS.field(Bool(), W1C, doc = "Interrupt request active (Write 1 to clear)")
+  val LAST_BRESP = REG_STATUS.field(Bits(2 bits), RO, doc = "Last AXI write response status")
 
   BUSY := dmaBusy
   LAST_BRESP := brespVal
 
   // 0x08: BASE_ADDR_LOW (RW)
-  val REG_BASE_LOW  = busif.newRegAt(address = 0x08, doc = "DRAM Frame Base Address (Lower 32 bits)")
-  val BASE_ADDR_LOW = REG_BASE_LOW.field(UInt(32 bits), RW, resetValue = 0, doc = "Lower 32 bits of Frame Destination Base Address (4KB aligned: bits 11..0 = 0)")
+  val REG_BASE_LOW = busif.newRegAt(address = 0x08, doc = "DRAM Frame Base Address (Lower 32 bits)")
+  val BASE_ADDR_LOW = REG_BASE_LOW.field(
+    UInt(32 bits),
+    RW,
+    resetValue = 0,
+    doc = "Lower 32 bits of Frame Destination Base Address (4KB aligned: bits 11..0 = 0)"
+  )
 
   // 0x0C: BASE_ADDR_HIGH (RW)
   val REG_BASE_HIGH = busif.newRegAt(address = 0x0c, doc = "DRAM Frame Base Address (Upper 32 bits)")
-  val BASE_ADDR_HIGH = REG_BASE_HIGH.field(UInt(32 bits), RW, resetValue = 0, doc = "Upper 32 bits of Frame Base Address (64-bit DRAM space)")
+  val BASE_ADDR_HIGH = REG_BASE_HIGH.field(
+    UInt(32 bits),
+    RW,
+    resetValue = 0,
+    doc = "Upper 32 bits of Frame Base Address (64-bit DRAM space)"
+  )
 
   // 0x10: STRIDE (RW)
-  val REG_STRIDE    = busif.newRegAt(address = 0x10, doc = "DRAM Frame Row Byte Stride")
-  val STRIDE        = REG_STRIDE.field(UInt(32 bits), RW, resetValue = 0, doc = "Framebuffer row byte stride / pitch (power of 2)")
+  val REG_STRIDE = busif.newRegAt(address = 0x10, doc = "DRAM Frame Row Byte Stride")
+  val STRIDE =
+    REG_STRIDE.field(UInt(32 bits), RW, resetValue = 0, doc = "Framebuffer row byte stride / pitch (power of 2)")
 
   // 0x14: TILES_X
-  val REG_TILES_X   = if (config.useAutoAdvance) busif.newRegAt(address = 0x14, doc = "Horizontal Tiles Count") else null
-  val TILES_X       = if (config.useAutoAdvance) REG_TILES_X.field(UInt(16 bits), RW, resetValue = 1, doc = "Total number of horizontal tiles per frame row") else null
+  val REG_TILES_X = if (config.useAutoAdvance) busif.newRegAt(address = 0x14, doc = "Horizontal Tiles Count") else null
+  val TILES_X =
+    if (config.useAutoAdvance)
+      REG_TILES_X.field(UInt(16 bits), RW, resetValue = 1, doc = "Total number of horizontal tiles per frame row")
+    else null
 
   // 0x18: TILES_Y
-  val REG_TILES_Y   = if (config.useAutoAdvance) busif.newRegAt(address = 0x18, doc = "Vertical Tile Rows Count") else null
-  val TILES_Y       = if (config.useAutoAdvance) REG_TILES_Y.field(UInt(16 bits), RW, resetValue = 1, doc = "Total number of vertical tile rows per frame") else null
+  val REG_TILES_Y =
+    if (config.useAutoAdvance) busif.newRegAt(address = 0x18, doc = "Vertical Tile Rows Count") else null
+  val TILES_Y =
+    if (config.useAutoAdvance)
+      REG_TILES_Y.field(UInt(16 bits), RW, resetValue = 1, doc = "Total number of vertical tile rows per frame")
+    else null
 
   // 0x1C: CUR_POS (RW) - Bits 15..0 = curTileX, bits 31..16 = curTileY
-  val REG_CUR_POS   = if (config.useAutoAdvance) busif.newRegAt(address = 0x1c, doc = "Current Tile Position") else null
-  val CUR_TILE_X    = if (config.useAutoAdvance) REG_CUR_POS.field(UInt(16 bits), RW, resetValue = 0, doc = "Current horizontal tile index (0..TILES_X-1)") else null
-  val CUR_TILE_Y    = if (config.useAutoAdvance) REG_CUR_POS.field(UInt(16 bits), RW, resetValue = 0, doc = "Current vertical tile row index (0..TILES_Y-1)") else null
+  val REG_CUR_POS = if (config.useAutoAdvance) busif.newRegAt(address = 0x1c, doc = "Current Tile Position") else null
+  val CUR_TILE_X =
+    if (config.useAutoAdvance)
+      REG_CUR_POS.field(UInt(16 bits), RW, resetValue = 0, doc = "Current horizontal tile index (0..TILES_X-1)")
+    else null
+  val CUR_TILE_Y =
+    if (config.useAutoAdvance)
+      REG_CUR_POS.field(UInt(16 bits), RW, resetValue = 0, doc = "Current vertical tile row index (0..TILES_Y-1)")
+    else null
 
   // 0x20: CURRENT_LINE (RO)
-  val REG_LINE      = busif.newRegAt(address = 0x20, doc = "Current Line Progress")
-  val CURRENT_LINE  = REG_LINE.field(UInt(log2Up(config.tileHeight + 1) bits), RO, doc = "Current line index within active tile (0..127)")
+  val REG_LINE = busif.newRegAt(address = 0x20, doc = "Current Line Progress")
+  val CURRENT_LINE =
+    REG_LINE.field(UInt(log2Up(config.tileHeight + 1) bits), RO, doc = "Current line index within active tile (0..127)")
   CURRENT_LINE := curLineIdx
 
   // 0x24: PERF_CYCLES (RO)
-  val REG_PERF      = busif.newRegAt(address = 0x24, doc = "Performance Cycle Counter")
-  val PERF_CYCLES   = REG_PERF.field(UInt(32 bits), RO, doc = "Elapsed clock cycles during active tile transfer")
+  val REG_PERF = busif.newRegAt(address = 0x24, doc = "Performance Cycle Counter")
+  val PERF_CYCLES = REG_PERF.field(UInt(32 bits), RO, doc = "Elapsed clock cycles during active tile transfer")
   PERF_CYCLES := cycleCounter
 
   // ===========================================================================
@@ -264,15 +295,19 @@ class AxiTileDma(
   //   Bit 1: error          - AXI bus write error (SLVERR/DECERR)
   //   Bit 2: frame_done     - Final tile of frame complete (Auto-Advance wrap)
   // ===========================================================================
-  val intrDone      = False
-  val intrError     = False
+  val intrDone = False
+  val intrError = False
   val intrFrameDone = False
 
   val INTR = busif.newIntrRFMS4(addr = 0x40, doc = "DMA Interrupt Controller")
-  val irqDoneStat      = INTR.fieldAt(0, intrDone,      maskRstVal = 0, doc = "Tile done interrupt (1: unmasked/open)")(SymbolName("done"))
-  val irqErrorStat     = INTR.fieldAt(1, intrError,     maskRstVal = 0, doc = "Error interrupt (1: unmasked/open)")(SymbolName("error"))
+  val irqDoneStat =
+    INTR.fieldAt(0, intrDone, maskRstVal = 0, doc = "Tile done interrupt (1: unmasked/open)")(SymbolName("done"))
+  val irqErrorStat =
+    INTR.fieldAt(1, intrError, maskRstVal = 0, doc = "Error interrupt (1: unmasked/open)")(SymbolName("error"))
   val irqFrameDoneStat = if (config.useAutoAdvance) {
-    INTR.fieldAt(2, intrFrameDone, maskRstVal = 0, doc = "Frame done interrupt (1: unmasked/open)")(SymbolName("frame_done"))
+    INTR.fieldAt(2, intrFrameDone, maskRstVal = 0, doc = "Frame done interrupt (1: unmasked/open)")(
+      SymbolName("frame_done")
+    )
   } else null
 
   val irqMerged = INTR.intr()
@@ -341,11 +376,11 @@ class AxiTileDma(
   // XOR path, and drives tile_ram.en and tile_ram.addr directly from registers.
   // ===========================================================================
   val ramArea = new ClockingArea(ramClock) {
-    val ramReadsLeft  = Reg(UInt(log2Up(config.totalBeats + 1) bits)) init (0)
+    val ramReadsLeft = Reg(UInt(log2Up(config.totalBeats + 1) bits)) init (0)
     val ramPushesLeft = Reg(UInt(log2Up(config.totalBeats + 1) bits)) init (0)
-    val ramAddrReg    = Reg(UInt(config.ramWordAddrWidth bits)) init (0)
-    val ramEnReg      = RegInit(False)
-    val active        = RegInit(False)
+    val ramAddrReg = Reg(UInt(config.ramWordAddrWidth bits)) init (0)
+    val ramEnReg = RegInit(False)
+    val active = RegInit(False)
 
     // Pipeline Stage 1: Register CDC FIFO push occupancy to isolate the popToPushGray XOR path
     val pushOccupancyReg = RegNext(cdcFifo.io.pushOccupancy) init (0)
@@ -363,19 +398,19 @@ class AxiTileDma(
 
     // Direct Register Outputs to BRAM pins (Zero combinational gates, optimal for 600 MHz)
     // BRAM is continuously enabled throughout active transfer; disabled when idle
-    io.tile_ram.en   := active
+    io.tile_ram.en := active
     io.tile_ram.addr := (ramAddrReg @@ U(0, config.beatShift bits)).resized
 
     // Delay read enable by bramReadLatency cycles to align with BRAM dout valid timing
     val readValid = Delay(ramEnReg, cycleCount = config.bramReadLatency, init = False)
 
     when(startPulseRam) {
-      ramReadsLeft  := config.totalBeats
+      ramReadsLeft := config.totalBeats
       ramPushesLeft := config.totalBeats
-      ramAddrReg    := 0
-      ramEnReg      := False
-      inFlight      := 0
-      active        := True
+      ramAddrReg := 0
+      ramEnReg := False
+      inFlight := 0
+      active := True
     }.otherwise {
       // Register read enable for cycle T+1
       ramEnReg := nextCanRead
@@ -413,7 +448,7 @@ class AxiTileDma(
     }
 
     // Push BRAM data directly into the dual-clock CDC FIFO
-    cdcFifo.io.push.valid   := readValid
+    cdcFifo.io.push.valid := readValid
     cdcFifo.io.push.payload := io.tile_ram.dout
   }
 
@@ -457,9 +492,9 @@ class AxiTileDma(
   // AXI4 AW (Write Address) Channel
   // ---------------------------------------------------------------------------
   io.m_axi.aw.valid := (state === DmaState.SEND_AW) && (outstandingBursts < config.maxOutstanding)
-  io.m_axi.aw.addr  := curDramAddr
-  io.m_axi.aw.len   := (currentBurstLen - 1).resized
-  io.m_axi.aw.size  := U(config.beatShift, 3 bits)
+  io.m_axi.aw.addr := curDramAddr
+  io.m_axi.aw.len := (currentBurstLen - 1).resized
+  io.m_axi.aw.size := U(config.beatShift, 3 bits)
   io.m_axi.aw.burst := Axi4.burst.INCR
 
   if (config.idWidth > 0) io.m_axi.aw.id.clearAll()
@@ -532,15 +567,15 @@ class AxiTileDma(
 
             val currentOrigin =
               ((CUR_TILE_X === 0 && CUR_TILE_Y === 0) || tileOriginAddr === 0) ? fullBaseAddr | tileOriginAddr
-            tileOriginAddr    := currentOrigin
-            rowStartTileAddr  := (CUR_TILE_X === 0) ? currentOrigin | rowStartTileAddr
+            tileOriginAddr := currentOrigin
+            rowStartTileAddr := (CUR_TILE_X === 0) ? currentOrigin | rowStartTileAddr
             lineStartDramAddr := currentOrigin
-            curDramAddr       := currentOrigin
+            curDramAddr := currentOrigin
           } else {
-            tileOriginAddr    := fullBaseAddr
-            rowStartTileAddr  := fullBaseAddr
+            tileOriginAddr := fullBaseAddr
+            rowStartTileAddr := fullBaseAddr
             lineStartDramAddr := fullBaseAddr
-            curDramAddr       := fullBaseAddr
+            curDramAddr := fullBaseAddr
           }
 
           currentLineInTile := 0
@@ -556,9 +591,9 @@ class AxiTileDma(
 
       is(DmaState.SEND_AW) {
         when(io.m_axi.aw.fire) {
-          activeBurstLen  := currentBurstLen
+          activeBurstLen := currentBurstLen
           wBeatsRemaining := currentBurstLen
-          state           := DmaState.READ_CDC_AND_WRITE_W
+          state := DmaState.READ_CDC_AND_WRITE_W
         }
       }
 
@@ -661,9 +696,9 @@ class AxiTileDma(
   }
 
   // Discrete status & interrupt outputs
-  io.irq            := irqMerged
-  io.irq_done       := INTR.RAW.readBits(0)
-  io.irq_error      := INTR.RAW.readBits(1)
+  io.irq := irqMerged
+  io.irq_done := INTR.RAW.readBits(0)
+  io.irq_error := INTR.RAW.readBits(1)
   io.irq_frame_done := (if (config.useAutoAdvance) INTR.RAW.readBits(2) else False)
 
   when(IRQ_ENABLE && (intrDone || intrError || intrFrameDone)) {
@@ -682,11 +717,11 @@ class AxiTileDmaWithRam(
   val ramClock = if (ramClockDomain != null) ramClockDomain else ClockDomain.external("ram", withReset = true)
 
   val io = new Bundle {
-    val s_axil_ctrl    = slave(AxiLite4(config.getAxiLiteConfig))
-    val m_axi          = master(Axi4WriteOnly(config.getAxi4Config))
-    val irq            = out Bool ()
-    val irq_done       = out Bool ()
-    val irq_error      = out Bool ()
+    val s_axil_ctrl = slave(AxiLite4(config.getAxiLiteConfig))
+    val m_axi = master(Axi4WriteOnly(config.getAxi4Config))
+    val irq = out Bool ()
+    val irq_done = out Bool ()
+    val irq_error = out Bool ()
     val irq_frame_done = out Bool ()
 
     // External Write Port into Tiled RAM (Operates in high-frequency ramClock domain)
@@ -720,9 +755,9 @@ class AxiTileDmaWithRam(
   val dma = new AxiTileDma(config, ramClockDomain = ramClock)
   dma.io.s_axil_ctrl <> io.s_axil_ctrl
   dma.io.m_axi <> io.m_axi
-  io.irq            := dma.io.irq
-  io.irq_done       := dma.io.irq_done
-  io.irq_error      := dma.io.irq_error
+  io.irq := dma.io.irq
+  io.irq_done := dma.io.irq_done
+  io.irq_error := dma.io.irq_error
   io.irq_frame_done := dma.io.irq_frame_done
 
   // Dual-Port BRAM in high-frequency ramClock domain

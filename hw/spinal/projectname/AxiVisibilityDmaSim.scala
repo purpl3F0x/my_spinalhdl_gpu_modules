@@ -36,9 +36,9 @@ class AxiReadOnlyMemorySim(axi: Axi4ReadOnly, clockDomain: ClockDomain) {
         clockDomain.waitSampling()
         if (axi.ar.valid.toBoolean && axi.ar.ready.toBoolean) {
           val addr = axi.ar.payload.addr.toLong
-          val len  = axi.ar.payload.len.toInt
+          val len = axi.ar.payload.len.toInt
           val size = axi.ar.payload.size.toInt
-          val id   = axi.ar.payload.id.toInt
+          val id = axi.ar.payload.id.toInt
           arQueue.enqueue(ArTransaction(addr, len, size, id))
         }
       }
@@ -113,12 +113,12 @@ class SimDataMoverResponder(
         clockDomain.waitSampling()
         if (cmdStream.valid.toBoolean && cmdStream.ready.toBoolean) {
           val raw = cmdStream.payload.toBigInt
-          val btt = (raw & 0x7FFFFF).toLong
+          val btt = (raw & 0x7fffff).toLong
           val tag = ((raw >> 30) & 0x3).toInt
           val saddr = if (addressWidth <= 32) {
-            ((raw >> 32) & 0xFFFFFFFFL).toLong
+            ((raw >> 32) & 0xffffffffL).toLong
           } else {
-            ((raw >> 32) & 0xFFFFFFFFFFFFFFFFL).toLong
+            ((raw >> 32) & 0xffffffffffffffffL).toLong
           }
 
           val cmd = ReceivedCmd(btt, tag, saddr, raw)
@@ -135,7 +135,7 @@ class SimDataMoverResponder(
         clockDomain.waitSampling()
         if (stsQueue.nonEmpty) {
           val (tag, isError) = stsQueue.head
-          val stsByte = if (!isError) (0x80 | (tag & 0xF)) else (0x40 | (tag & 0xF))
+          val stsByte = if (!isError) (0x80 | (tag & 0xf)) else (0x40 | (tag & 0xf))
 
           stsStream.valid #= true
           stsStream.payload #= stsByte
@@ -156,19 +156,19 @@ class SimDataMoverResponder(
 // =============================================================================
 object AxiVisibilityDmaSim extends App {
   val config = AxiVisibilityDmaConfig(
-    addressWidth         = 32,
-    axiDataWidth         = 128, // 128-bit AXI Read Master (configurable >= 64 bits)
-    bttWidth             = 23,  // 23-bit configurable BTT
-    gridWidth            = 10,
-    gridHeight           = 6,
-    vbWordBits           = 64,
-    triangleSizeBytes    = 128,
-    maxBurstLength       = 64,
-    maxOutstandingReads  = 4,
-    cmdFifoDepth         = 64,
-    stsFifoDepth         = 4,
-    vbFifoDepth          = 64, // >= maxBurstLength
-    useAutoAdvance       = true
+    addressWidth = 32,
+    axiDataWidth = 128, // 128-bit AXI Read Master (configurable >= 64 bits)
+    bttWidth = 23, // 23-bit configurable BTT
+    gridWidth = 10,
+    gridHeight = 6,
+    vbWordBits = 64,
+    triangleSizeBytes = 128,
+    maxBurstLength = 64,
+    maxOutstandingReads = 4,
+    cmdFifoDepth = 64,
+    stsFifoDepth = 4,
+    vbFifoDepth = 64, // >= maxBurstLength
+    useAutoAdvance = true
   )
 
   val simConfig = SimConfig
@@ -182,12 +182,12 @@ object AxiVisibilityDmaSim extends App {
   simConfig.compile(new AxiVisibilityDma(config)).doSim("AxiVisibilityDma_Test") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
 
-    val axilDriver  = new SimAxiLiteDriver(dut.io.s_axil_ctrl, dut.clockDomain)
-    val vbMemory    = new AxiReadOnlyMemorySim(dut.io.m_axi_vb, dut.clockDomain)
+    val axilDriver = new SimAxiLiteDriver(dut.io.s_axil_ctrl, dut.clockDomain)
+    val vbMemory = new AxiReadOnlyMemorySim(dut.io.m_axi_vb, dut.clockDomain)
     val dmResponder = new SimDataMoverResponder(
-      cmdStream    = dut.io.m_axis_datamover_cmd,
-      stsStream    = dut.io.s_axis_datamover_sts,
-      clockDomain  = dut.clockDomain,
+      cmdStream = dut.io.m_axis_datamover_cmd,
+      stsStream = dut.io.s_axis_datamover_sts,
+      clockDomain = dut.clockDomain,
       addressWidth = config.addressWidth
     )
 
@@ -202,16 +202,16 @@ object AxiVisibilityDmaSim extends App {
     println("=================================================================")
 
     // Triangle Geometry Base Address = 0x8000_1000 (lower 7 bits are 0x00)
-    axilDriver.write(0x10, 0x8000107FL)
+    axilDriver.write(0x10, 0x8000107fL)
     val readTriLow = axilDriver.read(0x10)
     println(f"Wrote TRI_BASE_LOW: 0x8000107F, Read Back: 0x$readTriLow%08X (Lower 7 bits must be 0)")
-    assert((readTriLow & 0x7F) == 0, "Error: lower 7 bits of TRI_BASE_LOW were not ignored!")
+    assert((readTriLow & 0x7f) == 0, "Error: lower 7 bits of TRI_BASE_LOW were not ignored!")
 
     // Visibility Buffer Base Address = 0x4000_2000 (lower 4 bits are 0 for 128-bit)
-    axilDriver.write(0x08, 0x4000200FL)
+    axilDriver.write(0x08, 0x4000200fL)
     val readVbLow = axilDriver.read(0x08)
     println(f"Wrote VB_BASE_LOW: 0x4000200F, Read Back: 0x$readVbLow%08X (Lower 4 bits must be 0 for 128-bit AXI)")
-    assert((readVbLow & 0x0F) == 0, "Error: lower 4 bits of VB_BASE_LOW were not ignored!")
+    assert((readVbLow & 0x0f) == 0, "Error: lower 4 bits of VB_BASE_LOW were not ignored!")
 
     // Check ready pin is high when idle
     assert(dut.io.ready.toBoolean, "Error: engine ready output must be true when idle!")
@@ -225,8 +225,8 @@ object AxiVisibilityDmaSim extends App {
 
     axilDriver.write(0x08, vbBaseAddr)
     axilDriver.write(0x10, triBaseAddr)
-    axilDriver.write(0x18, N)    // TRI_COUNT = 16
-    axilDriver.write(0x1C, 0)    // TILE_INDEX = 0
+    axilDriver.write(0x18, N) // TRI_COUNT = 16
+    axilDriver.write(0x1c, 0) // TILE_INDEX = 0
 
     // Visibility pattern for Tile 0 (bit 0):
     // Tri 0..2: Visible (3 consecutive)  -> Cmd 0: Addr = 0x8000_0000, BTT = 3 * 128 = 384 bytes
@@ -239,13 +239,13 @@ object AxiVisibilityDmaSim extends App {
     // Tri 15:   Visible (1 triangle)     -> Cmd 3: Addr = 0x8000_0780, BTT = 1 * 128 = 128 bytes
 
     val visibilityMaskTile0 = Array(
-      true, true, true,   // 0, 1, 2
-      false,              // 3
-      true, true,         // 4, 5
-      false, false,       // 6, 7
+      true, true, true, // 0, 1, 2
+      false, // 3
+      true, true, // 4, 5
+      false, false, // 6, 7
       true, true, true, true, true, // 8, 9, 10, 11, 12 (5 contiguous triangles!)
-      false, false,       // 13, 14
-      true                // 15
+      false, false, // 13, 14
+      true // 15
     )
 
     for (i <- 0 until N) {
@@ -261,7 +261,7 @@ object AxiVisibilityDmaSim extends App {
 
     // Enable IRQ and Auto-Advance in CTRL (IRQ_EN=1, AUTO_ADV_EN=1): 0x0D
     println("Triggering START for Tile 0...")
-    axilDriver.write(0x00, 0x0D)
+    axilDriver.write(0x00, 0x0d)
 
     var timeout = 500
     var done = false
@@ -282,7 +282,7 @@ object AxiVisibilityDmaSim extends App {
     // Read status counters
     val visCount = axilDriver.read(0x24)
     val cmdCount = axilDriver.read(0x28)
-    val stsCount = axilDriver.read(0x2C)
+    val stsCount = axilDriver.read(0x2c)
     println(f"STAT_VIS: $visCount, STAT_CMD: $cmdCount, STAT_STS: $stsCount")
     println("Verifying issued DataMover commands (Unchunked):")
     for ((cmd, idx) <- dmResponder.receivedCommands.zipWithIndex) {
@@ -308,19 +308,19 @@ object AxiVisibilityDmaSim extends App {
     println("=================================================================")
     println("Test 3: Tile Auto-Advancement to Tile 1")
     println("=================================================================")
-    val curTileIdx = axilDriver.read(0x1C)
+    val curTileIdx = axilDriver.read(0x1c)
     println(f"Current TILE_INDEX after auto-advance: $curTileIdx (Expected 1)")
     assert(curTileIdx == 1, f"Expected TILE_INDEX == 1, got $curTileIdx")
 
     // Clear DONE and IRQ (Write 1 to clear)
-    axilDriver.write(0x04, 0x0A)
+    axilDriver.write(0x04, 0x0a)
     dut.clockDomain.waitSampling(2)
     assert(!dut.io.irq.toBoolean, "Error: IRQ should be deasserted after W1C clear!")
 
     dmResponder.receivedCommands.clear()
 
     println("Triggering START for Tile 1...")
-    axilDriver.write(0x00, 0x0D)
+    axilDriver.write(0x00, 0x0d)
 
     timeout = 500
     done = false
@@ -340,7 +340,7 @@ object AxiVisibilityDmaSim extends App {
     assert(cmdCountTile1 == 1, f"Expected 1 merged command in Tile 1, got $cmdCountTile1")
     assert(dmResponder.receivedCommands(0).btt == 256, "Tile 1 BTT should be 256 bytes")
 
-    val nextTileIdx = axilDriver.read(0x1C)
+    val nextTileIdx = axilDriver.read(0x1c)
     println(f"Current TILE_INDEX after second auto-advance: $nextTileIdx (Expected 2)")
     assert(nextTileIdx == 2, f"Expected TILE_INDEX == 2, got $nextTileIdx")
 
@@ -348,7 +348,7 @@ object AxiVisibilityDmaSim extends App {
     println("Test 4: Odd Triangle Count (N = 13) with 128-bit AXI Master")
     println("=================================================================")
     // Clear DONE and IRQ
-    axilDriver.write(0x04, 0x0A)
+    axilDriver.write(0x04, 0x0a)
     dut.clockDomain.waitSampling(2)
 
     val oddN = 13
@@ -362,11 +362,11 @@ object AxiVisibilityDmaSim extends App {
     // Tri 7..11: Invisible
     // Tri 12:   Visible (odd last tri)   -> Cmd 2: BTT = 1 * 128 = 128B
     val visibilityMaskTile2 = Array(
-      true, true,       // 0, 1
-      false,            // 2
+      true, true, // 0, 1
+      false, // 2
       true, true, true, true, // 3, 4, 5, 6
       false, false, false, false, false, // 7..11
-      true              // 12 (last triangle)
+      true // 12 (last triangle)
     )
 
     for (i <- 0 until oddN) {
@@ -375,7 +375,7 @@ object AxiVisibilityDmaSim extends App {
     }
 
     println("Triggering START for Tile 2 (Odd N = 13)...")
-    axilDriver.write(0x00, 0x0D)
+    axilDriver.write(0x00, 0x0d)
 
     timeout = 500
     done = false
@@ -397,7 +397,7 @@ object AxiVisibilityDmaSim extends App {
     assert(dmResponder.receivedCommands(1).btt == 512, "Cmd 1 BTT should be 512 bytes")
     assert(dmResponder.receivedCommands(2).btt == 128, "Cmd 2 BTT should be 128 bytes")
 
-    val finalTileIdx = axilDriver.read(0x1C)
+    val finalTileIdx = axilDriver.read(0x1c)
     println(f"Current TILE_INDEX after third auto-advance: $finalTileIdx (Expected 3)")
     assert(finalTileIdx == 3, f"Expected TILE_INDEX == 3, got $finalTileIdx")
 

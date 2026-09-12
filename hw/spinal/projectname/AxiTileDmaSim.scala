@@ -16,7 +16,7 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
 
   case class AwTransaction(addr: Long, len: Int, size: Int, id: Int)
   val awQueue = mutable.Queue[AwTransaction]()
-  val bQueue  = mutable.Queue[(Int, Int)]() // (id, resp)
+  val bQueue = mutable.Queue[(Int, Int)]() // (id, resp)
 
   def start(): Unit = {
     // AW Handshake Channel
@@ -26,9 +26,9 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
         clockDomain.waitSampling()
         if (axi.aw.valid.toBoolean && axi.aw.ready.toBoolean) {
           val addr = axi.aw.payload.addr.toLong
-          val len  = axi.aw.payload.len.toInt
+          val len = axi.aw.payload.len.toInt
           val size = axi.aw.payload.size.toInt
-          val id   = axi.aw.payload.id.toInt
+          val id = axi.aw.payload.id.toInt
           awQueue.enqueue(AwTransaction(addr, len, size, id))
         }
       }
@@ -61,7 +61,7 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
 
           for (byteIdx <- 0 until bytesPerBeat) {
             if (((wstrb >> byteIdx) & 1) != 0) {
-              val byteVal = ((wdata >> (byteIdx * 8)) & 0xFF).toByte
+              val byteVal = ((wdata >> (byteIdx * 8)) & 0xff).toByte
               memory(beatAddr + byteIdx) = byteVal
             }
           }
@@ -98,7 +98,7 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
   }
 
   def readByte(addr: Long): Int = {
-    memory.getOrElse(addr, 0.toByte).toInt & 0xFF
+    memory.getOrElse(addr, 0.toByte).toInt & 0xff
   }
 
   def readInt(addr: Long): Long = {
@@ -116,10 +116,10 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
 class SimAxiLiteDriver(axil: AxiLite4, clockDomain: ClockDomain) {
   def reset(): Unit = {
     axil.aw.valid #= false
-    axil.w.valid  #= false
-    axil.b.ready  #= true
+    axil.w.valid #= false
+    axil.b.ready #= true
     axil.ar.valid #= false
-    axil.r.ready  #= true
+    axil.r.ready #= true
   }
 
   def write(address: Long, data: Long): Unit = {
@@ -127,11 +127,11 @@ class SimAxiLiteDriver(axil: AxiLite4, clockDomain: ClockDomain) {
     axil.aw.payload.addr #= address
     axil.w.valid #= true
     axil.w.payload.data #= data
-    axil.w.payload.strb #= 0xF
+    axil.w.payload.strb #= 0xf
     axil.b.ready #= true
 
     var awDone = false
-    var wDone  = false
+    var wDone = false
     while (!awDone || !wDone) {
       clockDomain.waitSampling()
       if (axil.aw.ready.toBoolean) {
@@ -232,16 +232,16 @@ class SimBramMemory(
 object AxiTileDmaSim extends App {
   // Test Configuration: 128x128 tile, 128-bit AXI bus (4 px/clock), 4x3 grid
   val config = AxiTileDmaConfig(
-    addressWidth   = 32,
-    pixelsPerClock = 4,    // 4 pixels/clock = 128-bit AXI data bus
-    tileWidth      = 128,  // 128 pixels wide
-    tileHeight     = 128,  // 128 lines high
+    addressWidth = 32,
+    pixelsPerClock = 4, // 4 pixels/clock = 128-bit AXI data bus
+    tileWidth = 128, // 128 pixels wide
+    tileHeight = 128, // 128 lines high
     maxBurstLength = 256,
     maxOutstanding = 8,
-    idWidth        = 4,
-    cdcDepth       = 16,
+    idWidth = 4,
+    cdcDepth = 16,
     useAutoAdvance = true,
-    bramReadLatency = 4    // 3-cycle BRAM read latency (testing 3-cycle UltraScale+ BRAM pipeline mode)
+    bramReadLatency = 4 // 3-cycle BRAM read latency (testing 3-cycle UltraScale+ BRAM pipeline mode)
   )
 
   // Fast simulation with IVerilog backend
@@ -259,8 +259,8 @@ object AxiTileDmaSim extends App {
     // AXI Bus Clock: 100 MHz (period 10 ns)
     // Fast RAM Clock: 200 MHz (period 5 ns)
     // -------------------------------------------------------------------------
-    dut.clockDomain.forkStimulus(period = 10)     // clk & reset (AXI domain)
-    dut.ramClock.forkStimulus(period = 5)         // ram_clk & ram_reset (RAM domain)
+    dut.clockDomain.forkStimulus(period = 10) // clk & reset (AXI domain)
+    dut.ramClock.forkStimulus(period = 5) // ram_clk & ram_reset (RAM domain)
 
     val axiClock = dut.clockDomain
     val ramClock = dut.ramClock
@@ -294,11 +294,11 @@ object AxiTileDmaSim extends App {
     // -------------------------------------------------------------------------
     val gridTilesX = 4
     val gridTilesY = 3
-    val tileWidth  = 128
+    val tileWidth = 128
     val tileHeight = 128
-    val frameWidthPixels = gridTilesX * tileWidth   // 512 pixels
-    val frameHeightLines = gridTilesY * tileHeight  // 384 lines
-    val frameRowStrideBytes = frameWidthPixels * 4  // 2048 bytes (Power of 2: 2^11)
+    val frameWidthPixels = gridTilesX * tileWidth // 512 pixels
+    val frameHeightLines = gridTilesY * tileHeight // 384 lines
+    val frameRowStrideBytes = frameWidthPixels * 4 // 2048 bytes (Power of 2: 2^11)
     val dramBaseAddr = 0x00010000L
 
     println(s"======================================================================")
@@ -312,12 +312,12 @@ object AxiTileDmaSim extends App {
     println(s"======================================================================")
 
     // Program DMA Control Registers via AXI-Lite
-    axilDriver.write(0x08, dramBaseAddr & 0xFFFFFFFFL)     // BASE_ADDR_LOW
-    axilDriver.write(0x0C, (dramBaseAddr >> 32) & 0xFFFFFFFFL) // BASE_ADDR_HIGH
-    axilDriver.write(0x10, frameRowStrideBytes)            // STRIDE = 2048
-    axilDriver.write(0x14, gridTilesX)                     // TILES_X = 4
-    axilDriver.write(0x18, gridTilesY)                     // TILES_Y = 3
-    axilDriver.write(0x00, 0x04)                           // IRQ_ENABLE = 1
+    axilDriver.write(0x08, dramBaseAddr & 0xffffffffL) // BASE_ADDR_LOW
+    axilDriver.write(0x0c, (dramBaseAddr >> 32) & 0xffffffffL) // BASE_ADDR_HIGH
+    axilDriver.write(0x10, frameRowStrideBytes) // STRIDE = 2048
+    axilDriver.write(0x14, gridTilesX) // TILES_X = 4
+    axilDriver.write(0x18, gridTilesY) // TILES_Y = 3
+    axilDriver.write(0x00, 0x04) // IRQ_ENABLE = 1
 
     println("[AXI-Lite] Initialized BaseAddr, Stride, TilesX, TilesY registers.")
 
@@ -339,11 +339,11 @@ object AxiTileDmaSim extends App {
             for (px <- 0 until config.pixelsPerClock) {
               val localX = beatX * config.pixelsPerClock + px
               // 32-bit pixel encoding: [31..24]=tileX, [23..16]=tileY, [15..8]=localY, [7..0]=localX
-              val pixelVal = ((tileX.toLong & 0xFF) << 24) |
-                             ((tileY.toLong & 0xFF) << 16) |
-                             ((localY.toLong & 0xFF) << 8)  |
-                             (localX.toLong & 0xFF)
-              word128 |= (BigInt(pixelVal) & 0xFFFFFFFFL) << (px * 32)
+              val pixelVal = ((tileX.toLong & 0xff) << 24) |
+                ((tileY.toLong & 0xff) << 16) |
+                ((localY.toLong & 0xff) << 8) |
+                (localX.toLong & 0xff)
+              word128 |= (BigInt(pixelVal) & 0xffffffffL) << (px * 32)
             }
             writeBramWord(wordAddr, word128)
           }
@@ -361,16 +361,18 @@ object AxiTileDmaSim extends App {
           pollCycles += 10
           if (pollCycles % 2000 == 0) {
             val perf = axilDriver.read(0x24)
-            val pos  = axilDriver.read(0x1C)
-            println(s"    [Poll $pollCycles] Status=0x${status.toHexString}, PerfCycles=$perf, Pos=0x${pos.toHexString}")
+            val pos = axilDriver.read(0x1c)
+            println(
+              s"    [Poll $pollCycles] Status=0x${status.toHexString}, PerfCycles=$perf, Pos=0x${pos.toHexString}"
+            )
           }
         } while ((status & 0x02) == 0 && pollCycles < 50000)
 
         assert((status & 0x02) != 0, s"Timeout waiting for Tile ($tileX, $tileY) to finish!")
         val perfCycles = axilDriver.read(0x24)
-        val curPos     = axilDriver.read(0x1C)
-        val nextX      = curPos & 0xFFFF
-        val nextY      = (curPos >> 16) & 0xFFFF
+        val curPos = axilDriver.read(0x1c)
+        val nextX = curPos & 0xffff
+        val nextY = (curPos >> 16) & 0xffff
 
         println(f"    Completed in $perfCycles cycles. Status=0x$status%X. Next Tile Pos=($nextX, $nextY)")
 
@@ -399,15 +401,15 @@ object AxiTileDmaSim extends App {
 
     for (globalY <- 0 until frameHeightLines) {
       for (globalX <- 0 until frameWidthPixels) {
-        val expectedTileX  = globalX / tileWidth
-        val expectedTileY  = globalY / tileHeight
+        val expectedTileX = globalX / tileWidth
+        val expectedTileY = globalY / tileHeight
         val expectedLocalX = globalX % tileWidth
         val expectedLocalY = globalY % tileHeight
 
-        val expectedPixel = ((expectedTileX.toLong & 0xFF) << 24) |
-                            ((expectedTileY.toLong & 0xFF) << 16) |
-                            ((expectedLocalY.toLong & 0xFF) << 8)  |
-                            (expectedLocalX.toLong & 0xFF)
+        val expectedPixel = ((expectedTileX.toLong & 0xff) << 24) |
+          ((expectedTileY.toLong & 0xff) << 16) |
+          ((expectedLocalY.toLong & 0xff) << 8) |
+          (expectedLocalX.toLong & 0xff)
 
         val pixelByteAddr = dramBaseAddr + (globalY * frameRowStrideBytes) + (globalX * 4)
 
@@ -416,9 +418,11 @@ object AxiTileDmaSim extends App {
 
         if (actualPixel != expectedPixel) {
           if (errorCount < 10) {
-            println(f"[ERROR] Mismatch at Global ($globalX%3d, $globalY%3d) [DRAM Addr: 0x$pixelByteAddr%08X]: " +
-                    f"Expected 0x$expectedPixel%08X (Tile=($expectedTileX,$expectedTileY), Local=($expectedLocalX,$expectedLocalY)), " +
-                    f"Actual = 0x$actualPixel%08X")
+            println(
+              f"[ERROR] Mismatch at Global ($globalX%3d, $globalY%3d) [DRAM Addr: 0x$pixelByteAddr%08X]: " +
+                f"Expected 0x$expectedPixel%08X (Tile=($expectedTileX,$expectedTileY), Local=($expectedLocalX,$expectedLocalY)), " +
+                f"Actual = 0x$actualPixel%08X"
+            )
           }
           errorCount += 1
         }

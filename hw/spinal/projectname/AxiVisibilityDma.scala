@@ -12,46 +12,55 @@ import spinal.lib.fsm._
 // Configuration for AxiVisibilityDma
 // =============================================================================
 case class AxiVisibilityDmaConfig(
-    addressWidth: Int = 32,            // Address width (32 up to 64 bits)
-    axiDataWidth: Int = 128,           // AXI4 Read Master data width (>= 64 bits, e.g. 64, 128, 256)
-    bttWidth: Int = 23,                // DataMover BTT (Bytes To Transfer) width (up to 23 bits)
-    gridWidth: Int = 10,               // Visibility grid width in tiles (default: 10)
-    gridHeight: Int = 6,               // Visibility grid height in tiles (default: 6)
-    vbWordBits: Int = 64,              // Visibility buffer word width (64 bits: 60 bits grid + 4 bits padding)
-    triangleSizeBytes: Int = 128,      // Triangle data footprint in bytes
-    maxBurstLength: Int = 256,         // Max AXI4 Read burst beats (1..256)
-    maxOutstandingReads: Int = 8,      // Max outstanding AXI4 Read address transactions
-    cmdFifoDepth: Int = 64,            // Depth of DataMover command FIFO (64 entries reduces backpressure)
-    stsFifoDepth: Int = 4,             // Depth of DataMover status FIFO (4 entries since consumed 1 per clock)
-    vbFifoDepth: Int = 256,            // Depth of visibility read decoupling FIFO (512 entries fits in BRAM)
-    useAutoAdvance: Boolean = true,    // Support automatic tile index advancing (0..59)
-    trianglesPerCycle: Int = 2         // Process 2 triangles per clock cycle (600 MTris/s @ 300MHz)
+    addressWidth: Int = 32, // Address width (32 up to 64 bits)
+    axiDataWidth: Int = 128, // AXI4 Read Master data width (>= 64 bits, e.g. 64, 128, 256)
+    bttWidth: Int = 23, // DataMover BTT (Bytes To Transfer) width (up to 23 bits)
+    gridWidth: Int = 10, // Visibility grid width in tiles (default: 10)
+    gridHeight: Int = 6, // Visibility grid height in tiles (default: 6)
+    vbWordBits: Int = 64, // Visibility buffer word width (64 bits: 60 bits grid + 4 bits padding)
+    triangleSizeBytes: Int = 128, // Triangle data footprint in bytes
+    maxBurstLength: Int = 256, // Max AXI4 Read burst beats (1..256)
+    maxOutstandingReads: Int = 8, // Max outstanding AXI4 Read address transactions
+    cmdFifoDepth: Int = 64, // Depth of DataMover command FIFO (64 entries reduces backpressure)
+    stsFifoDepth: Int = 4, // Depth of DataMover status FIFO (4 entries since consumed 1 per clock)
+    vbFifoDepth: Int = 256, // Depth of visibility read decoupling FIFO (512 entries fits in BRAM)
+    useAutoAdvance: Boolean = true, // Support automatic tile index advancing (0..59)
+    trianglesPerCycle: Int = 2 // Process 2 triangles per clock cycle (600 MTris/s @ 300MHz)
 ) {
   val gridTiles: Int = gridWidth * gridHeight
   require(gridTiles <= vbWordBits, s"gridTiles ($gridTiles) cannot exceed vbWordBits ($vbWordBits)")
   require(axiDataWidth >= vbWordBits, s"axiDataWidth ($axiDataWidth) must be >= vbWordBits ($vbWordBits)")
   require(isPow2(axiDataWidth), "axiDataWidth must be a power of 2 (e.g. 64, 128, 256)")
-  require(axiDataWidth % vbWordBits == 0, s"axiDataWidth ($axiDataWidth) must be a multiple of vbWordBits ($vbWordBits)")
+  require(
+    axiDataWidth % vbWordBits == 0,
+    s"axiDataWidth ($axiDataWidth) must be a multiple of vbWordBits ($vbWordBits)"
+  )
   require(addressWidth >= 32 && addressWidth <= 64, "addressWidth must be between 32 and 64 bits")
   require(isPow2(triangleSizeBytes), "triangleSizeBytes must be a power of 2 (e.g. 128)")
   require(maxBurstLength >= 1 && maxBurstLength <= 256, "maxBurstLength must be between 1 and 256 beats")
   require(cmdFifoDepth >= 4 && isPow2(cmdFifoDepth), "cmdFifoDepth must be a power of 2 >= 4")
   require(stsFifoDepth >= 4 && isPow2(stsFifoDepth), "stsFifoDepth must be a power of 2 >= 4")
   require(vbFifoDepth >= 4 && isPow2(vbFifoDepth), "vbFifoDepth must be a power of 2 >= 4")
-  require(vbFifoDepth >= maxBurstLength, s"vbFifoDepth ($vbFifoDepth) must be >= maxBurstLength ($maxBurstLength) to guarantee full burst absorption")
-  require(bttWidth >= 8 && bttWidth <= 23, s"bttWidth ($bttWidth) must be between 8 and 23 bits (Xilinx DataMover limit)")
+  require(
+    vbFifoDepth >= maxBurstLength,
+    s"vbFifoDepth ($vbFifoDepth) must be >= maxBurstLength ($maxBurstLength) to guarantee full burst absorption"
+  )
+  require(
+    bttWidth >= 8 && bttWidth <= 23,
+    s"bttWidth ($bttWidth) must be between 8 and 23 bits (Xilinx DataMover limit)"
+  )
 
   val wordsPerBeat: Int = axiDataWidth / vbWordBits
-  val triangleShift: Int = log2Up(triangleSizeBytes)       // 7 bits for 128 bytes
+  val triangleShift: Int = log2Up(triangleSizeBytes) // 7 bits for 128 bytes
   val triWordAddrWidth: Int = addressWidth - triangleShift // Address truncated by 7 bits
-  val axiBytesPerBeat: Int = axiDataWidth / 8              // 16 bytes for 128-bit
-  val axiBeatShift: Int = log2Up(axiBytesPerBeat)          // 4 bits for 16 bytes
+  val axiBytesPerBeat: Int = axiDataWidth / 8 // 16 bytes for 128-bit
+  val axiBeatShift: Int = log2Up(axiBytesPerBeat) // 4 bits for 16 bytes
   val vbBytesPerBeat: Int = axiBytesPerBeat
   val vbBeatShift: Int = axiBeatShift
-  val vbWordAddrWidth: Int = addressWidth - axiBeatShift   // Address truncated by axiBeatShift bits
+  val vbWordAddrWidth: Int = addressWidth - axiBeatShift // Address truncated by axiBeatShift bits
 
   // Maximum triangles in a single BTT transfer (BTT is multiple of 128, so lower 7 bits are 0)
-  val bttTriCountWidth: Int = bttWidth - triangleShift     // e.g. 23 - 7 = 16 bits
+  val bttTriCountWidth: Int = bttWidth - triangleShift // e.g. 23 - 7 = 16 bits
   val maxBttTriangles: BigInt = (BigInt(1) << bttTriCountWidth) - 1
 
   // AMD / Xilinx LogiCORE IP AXI DataMover (PG022) Command Width
@@ -61,19 +70,19 @@ case class AxiVisibilityDmaConfig(
 
   def getAxi4ReadConfig: Axi4Config = Axi4Config(
     addressWidth = addressWidth,
-    dataWidth    = axiDataWidth,
-    idWidth      = 4,
-    useBurst     = true,
-    useSize      = true,
-    useLen       = true,
-    useLast      = true,
-    useResp      = true,
-    useId        = true
+    dataWidth = axiDataWidth,
+    idWidth = 4,
+    useBurst = true,
+    useSize = true,
+    useLen = true,
+    useLast = true,
+    useResp = true,
+    useId = true
   )
 
   def getAxiLiteConfig: AxiLite4Config = AxiLite4Config(
     addressWidth = 8,
-    dataWidth    = 32
+    dataWidth = 32
   )
 }
 
@@ -81,9 +90,9 @@ case class AxiVisibilityDmaConfig(
 // Internal Compact Command Representation for DataMover FIFO
 // =============================================================================
 case class DataMoverCmdCompact(triWordAddrWidth: Int, bttTriCountWidth: Int) extends Bundle {
-  val triWordAddr = UInt(triWordAddrWidth bits)  // Truncated triangle address (bits [addrWidth-1 : 7])
-  val triCount    = UInt(bttTriCountWidth bits)  // Triangle count (BTT [bttWidth-1 : 7])
-  val tag         = Bits(4 bits)
+  val triWordAddr = UInt(triWordAddrWidth bits) // Truncated triangle address (bits [addrWidth-1 : 7])
+  val triCount = UInt(bttTriCountWidth bits) // Triangle count (BTT [bttWidth-1 : 7])
+  val tag = Bits(4 bits)
 }
 
 // =============================================================================
@@ -112,10 +121,10 @@ class AxiVisibilityDma(
     val s_axis_datamover_sts = slave(Stream(Bits(config.stsWidth bits)))
 
     // 5. Discrete Engine Status Outputs (aclk domain)
-    val ready          = out Bool () // Asserted when engine is IDLE and ready for a new START trigger
-    val irq            = out Bool () // Combined Interrupt output (masked)
-    val irq_done       = out Bool () // Dedicated Tile Done Interrupt output (masked)
-    val irq_error      = out Bool () // Dedicated Error Interrupt output (masked)
+    val ready = out Bool () // Asserted when engine is IDLE and ready for a new START trigger
+    val irq = out Bool () // Combined Interrupt output (masked)
+    val irq_done = out Bool () // Dedicated Tile Done Interrupt output (masked)
+    val irq_error = out Bool () // Dedicated Error Interrupt output (masked)
     val irq_frame_done = out Bool () // Dedicated Frame Done Interrupt output (masked)
   }
 
@@ -216,61 +225,88 @@ class AxiVisibilityDma(
   val busif = AxiLite4BusInterface(io.s_axil_ctrl, (0x0000, 256), "AXI_VISIBILITY_DMA")
 
   // Internal hardware status signals
-  val dmaBusy       = RegInit(False)
-  val axiReadError  = RegInit(False)
-  val dmErrorFlag   = RegInit(False)
-  val dmLastStsReg  = Reg(Bits(8 bits)) init (0)
-  val cycleCounter  = Reg(UInt(32 bits)) init (0)
-  val statVisCount  = Reg(UInt(32 bits)) init (0)
-  val statCmdCount  = Reg(UInt(32 bits)) init (0)
-  val statStsCount  = Reg(UInt(32 bits)) init (0)
+  val dmaBusy = RegInit(False)
+  val axiReadError = RegInit(False)
+  val dmErrorFlag = RegInit(False)
+  val dmLastStsReg = Reg(Bits(8 bits)) init (0)
+  val cycleCounter = Reg(UInt(32 bits)) init (0)
+  val statVisCount = Reg(UInt(32 bits)) init (0)
+  val statCmdCount = Reg(UInt(32 bits)) init (0)
+  val statStsCount = Reg(UInt(32 bits)) init (0)
 
   // 0x00: CONTROL REGISTER
-  val REG_CTRL      = busif.newRegAt(address = 0x00, doc = "DMA Control Register")
-  val START         = REG_CTRL.field(Bool(), W1P, doc = "Trigger visibility scan and command generation")
-  val SOFT_RESET    = REG_CTRL.field(Bool(), W1P, doc = "Software reset for engine and internal FIFOs")
-  val IRQ_ENABLE    = REG_CTRL.field(Bool(), RW, resetValue = 1, doc = "Global Interrupt Enable (1: enabled)")
-  val AUTO_ADV_EN   = if (config.useAutoAdvance) REG_CTRL.field(Bool(), RW, resetValue = 1, doc = "Enable auto-advancing tile index") else null
+  val REG_CTRL = busif.newRegAt(address = 0x00, doc = "DMA Control Register")
+  val START = REG_CTRL.field(Bool(), W1P, doc = "Trigger visibility scan and command generation")
+  val SOFT_RESET = REG_CTRL.field(Bool(), W1P, doc = "Software reset for engine and internal FIFOs")
+  val IRQ_ENABLE = REG_CTRL.field(Bool(), RW, resetValue = 1, doc = "Global Interrupt Enable (1: enabled)")
+  val AUTO_ADV_EN =
+    if (config.useAutoAdvance) REG_CTRL.field(Bool(), RW, resetValue = 1, doc = "Enable auto-advancing tile index")
+    else null
 
   // 0x04: STATUS REGISTER (W1C fields are internal registers in regif)
-  val REG_STATUS    = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
-  val BUSY          = REG_STATUS.field(Bool(), RO, doc = "Engine active busy status")
-  val DONE          = REG_STATUS.field(Bool(), W1C, doc = "Tile processing complete (Write 1 to clear)")
-  val ERROR         = REG_STATUS.field(Bool(), W1C, doc = "Error detected on AXI read or DataMover (Write 1 to clear)")
-  val IRQ_STATUS    = REG_STATUS.field(Bool(), W1C, doc = "Interrupt pending (Write 1 to clear)")
-  val FRAME_DONE    = if (config.useAutoAdvance) REG_STATUS.field(Bool(), W1C, doc = "All 60 tiles completed / wrapped (Write 1 to clear)") else null
-  val AXI_ERR_FLAG  = REG_STATUS.field(Bool(), RO, doc = "AXI Read Master Bus Error")
-  val DM_ERR_FLAG   = REG_STATUS.field(Bool(), RO, doc = "DataMover Status Error")
+  val REG_STATUS = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
+  val BUSY = REG_STATUS.field(Bool(), RO, doc = "Engine active busy status")
+  val DONE = REG_STATUS.field(Bool(), W1C, doc = "Tile processing complete (Write 1 to clear)")
+  val ERROR = REG_STATUS.field(Bool(), W1C, doc = "Error detected on AXI read or DataMover (Write 1 to clear)")
+  val IRQ_STATUS = REG_STATUS.field(Bool(), W1C, doc = "Interrupt pending (Write 1 to clear)")
+  val FRAME_DONE =
+    if (config.useAutoAdvance)
+      REG_STATUS.field(Bool(), W1C, doc = "All 60 tiles completed / wrapped (Write 1 to clear)")
+    else null
+  val AXI_ERR_FLAG = REG_STATUS.field(Bool(), RO, doc = "AXI Read Master Bus Error")
+  val DM_ERR_FLAG = REG_STATUS.field(Bool(), RO, doc = "DataMover Status Error")
 
-  BUSY         := dmaBusy
+  BUSY := dmaBusy
   AXI_ERR_FLAG := axiReadError
-  DM_ERR_FLAG  := dmErrorFlag
+  DM_ERR_FLAG := dmErrorFlag
 
   // 0x08: VB_BASE_ADDR_LOW (8-byte aligned, bits [2:0] reserved/ignored)
-  val REG_VB_LOW    = busif.newRegAt(address = 0x08, doc = "Visibility Buffer Base Address [31:0] (8-byte aligned)")
+  val REG_VB_LOW = busif.newRegAt(address = 0x08, doc = "Visibility Buffer Base Address [31:0] (8-byte aligned)")
   REG_VB_LOW.reserved(config.vbBeatShift bits)
-  val VB_BASE_LOW   = REG_VB_LOW.field(UInt((32 - config.vbBeatShift) bits), RW, resetValue = 0, doc = "Visibility Buffer Base Address [31:3]")
+  val VB_BASE_LOW = REG_VB_LOW.field(
+    UInt((32 - config.vbBeatShift) bits),
+    RW,
+    resetValue = 0,
+    doc = "Visibility Buffer Base Address [31:3]"
+  )
 
   // 0x0C: VB_BASE_ADDR_HIGH
-  val REG_VB_HIGH   = busif.newRegAt(address = 0x0C, doc = "Visibility Buffer Base Address [63:32]")
-  val VB_BASE_HIGH  = REG_VB_HIGH.field(UInt(32 bits), RW, resetValue = 0, doc = "Upper 32 bits of Visibility Buffer Base Address")
+  val REG_VB_HIGH = busif.newRegAt(address = 0x0c, doc = "Visibility Buffer Base Address [63:32]")
+  val VB_BASE_HIGH =
+    REG_VB_HIGH.field(UInt(32 bits), RW, resetValue = 0, doc = "Upper 32 bits of Visibility Buffer Base Address")
 
   // 0x10: TRI_BASE_ADDR_LOW (128-byte aligned, bits [6:0] reserved/ignored)
-  val REG_TRI_LOW   = busif.newRegAt(address = 0x10, doc = "Triangle Geometry Base Address [31:0] (128-byte aligned)")
+  val REG_TRI_LOW = busif.newRegAt(address = 0x10, doc = "Triangle Geometry Base Address [31:0] (128-byte aligned)")
   REG_TRI_LOW.reserved(config.triangleShift bits)
-  val TRI_BASE_LOW  = REG_TRI_LOW.field(UInt((32 - config.triangleShift) bits), RW, resetValue = 0, doc = "Triangle Geometry Base Address [31:7]")
+  val TRI_BASE_LOW = REG_TRI_LOW.field(
+    UInt((32 - config.triangleShift) bits),
+    RW,
+    resetValue = 0,
+    doc = "Triangle Geometry Base Address [31:7]"
+  )
 
   // 0x14: TRI_BASE_ADDR_HIGH
-  val REG_TRI_HIGH  = busif.newRegAt(address = 0x14, doc = "Triangle Geometry Base Address [63:32]")
-  val TRI_BASE_HIGH = REG_TRI_HIGH.field(UInt(32 bits), RW, resetValue = 0, doc = "Upper 32 bits of Triangle Geometry Base Address")
+  val REG_TRI_HIGH = busif.newRegAt(address = 0x14, doc = "Triangle Geometry Base Address [63:32]")
+  val TRI_BASE_HIGH =
+    REG_TRI_HIGH.field(UInt(32 bits), RW, resetValue = 0, doc = "Upper 32 bits of Triangle Geometry Base Address")
 
   // 0x18: TRI_COUNT (N)
   val REG_TRI_COUNT = busif.newRegAt(address = 0x18, doc = "Triangle Count (N elements)")
-  val TRI_COUNT     = REG_TRI_COUNT.field(UInt(32 bits), RW, resetValue = 0, doc = "Total number of triangle visibility elements to evaluate")
+  val TRI_COUNT = REG_TRI_COUNT.field(
+    UInt(32 bits),
+    RW,
+    resetValue = 0,
+    doc = "Total number of triangle visibility elements to evaluate"
+  )
 
   // 0x1C: TILE_INDEX
-  val REG_TILE_IDX  = busif.newRegAt(address = 0x1C, doc = "Active Tile Index (0..59)")
-  val TILE_INDEX    = REG_TILE_IDX.field(UInt(log2Up(config.gridTiles) bits), RW, resetValue = 0, doc = "Tile selection bit index (0..59) in 64-bit visibility word")
+  val REG_TILE_IDX = busif.newRegAt(address = 0x1c, doc = "Active Tile Index (0..59)")
+  val TILE_INDEX = REG_TILE_IDX.field(
+    UInt(log2Up(config.gridTiles) bits),
+    RW,
+    resetValue = 0,
+    doc = "Tile selection bit index (0..59) in 64-bit visibility word"
+  )
 
   // 0x20: BTT_LIMIT (128-byte aligned, bits [6:0] reserved/ignored)
   val REG_BTT_LIMIT = busif.newRegAt(address = 0x20, doc = "BTT Byte Limit per Command (128-byte aligned)")
@@ -283,28 +319,28 @@ class AxiVisibilityDma(
   )
 
   // 0x24: STAT_VIS_COUNT
-  val REG_STAT_VIS  = busif.newRegAt(address = 0x24, doc = "Visible Triangle Counter")
-  val STAT_VIS      = REG_STAT_VIS.field(UInt(32 bits), RO, doc = "Total visible triangles encountered in current tile")
+  val REG_STAT_VIS = busif.newRegAt(address = 0x24, doc = "Visible Triangle Counter")
+  val STAT_VIS = REG_STAT_VIS.field(UInt(32 bits), RO, doc = "Total visible triangles encountered in current tile")
   STAT_VIS := statVisCount
 
   // 0x28: STAT_CMD_COUNT
-  val REG_STAT_CMD  = busif.newRegAt(address = 0x28, doc = "DataMover Commands Issued Counter")
-  val STAT_CMD      = REG_STAT_CMD.field(UInt(32 bits), RO, doc = "Total DataMover command packets sent")
+  val REG_STAT_CMD = busif.newRegAt(address = 0x28, doc = "DataMover Commands Issued Counter")
+  val STAT_CMD = REG_STAT_CMD.field(UInt(32 bits), RO, doc = "Total DataMover command packets sent")
   STAT_CMD := statCmdCount
 
   // 0x2C: STAT_STS_COUNT
-  val REG_STAT_STS  = busif.newRegAt(address = 0x2C, doc = "DataMover Status Received Counter")
-  val STAT_STS      = REG_STAT_STS.field(UInt(32 bits), RO, doc = "Total DataMover status responses received")
+  val REG_STAT_STS = busif.newRegAt(address = 0x2c, doc = "DataMover Status Received Counter")
+  val STAT_STS = REG_STAT_STS.field(UInt(32 bits), RO, doc = "Total DataMover status responses received")
   STAT_STS := statStsCount
 
   // 0x30: DM_LAST_STS
-  val REG_DM_LAST   = busif.newRegAt(address = 0x30, doc = "Last DataMover Status Byte")
-  val DM_LAST_STS   = REG_DM_LAST.field(Bits(8 bits), RO, doc = "Last received raw status byte from DataMover")
+  val REG_DM_LAST = busif.newRegAt(address = 0x30, doc = "Last DataMover Status Byte")
+  val DM_LAST_STS = REG_DM_LAST.field(Bits(8 bits), RO, doc = "Last received raw status byte from DataMover")
   DM_LAST_STS := dmLastStsReg
 
   // 0x34: PERF_CYCLES
-  val REG_PERF      = busif.newRegAt(address = 0x34, doc = "Performance Cycle Counter")
-  val PERF_CYCLES   = REG_PERF.field(UInt(32 bits), RO, doc = "Elapsed clock cycles during active tile scan")
+  val REG_PERF = busif.newRegAt(address = 0x34, doc = "Performance Cycle Counter")
+  val PERF_CYCLES = REG_PERF.field(UInt(32 bits), RO, doc = "Elapsed clock cycles during active tile scan")
   PERF_CYCLES := cycleCounter
 
   // ===========================================================================
@@ -319,17 +355,20 @@ class AxiVisibilityDma(
   //   Bit 1: error          - AXI read error or DataMover status error
   //   Bit 2: frame_done     - All 60 tiles completed (Auto-Advance wrap)
   // ===========================================================================
-  val intrDone      = False
-  val intrError     = False
+  val intrDone = False
+  val intrError = False
   val intrFrameDone = False
 
   val INTR = busif.newIntrRFMS4(addr = 0x40, doc = "DMA Interrupt Controller")
-  val irqDoneStat      = INTR.fieldAt(0, intrDone,      maskRstVal = 0, doc = "Tile done interrupt (1: unmasked/open)")(SymbolName("done"))
-  val irqErrorStat     = INTR.fieldAt(1, intrError,     maskRstVal = 0, doc = "Error interrupt (1: unmasked/open)")(SymbolName("error"))
+  val irqDoneStat =
+    INTR.fieldAt(0, intrDone, maskRstVal = 0, doc = "Tile done interrupt (1: unmasked/open)")(SymbolName("done"))
+  val irqErrorStat =
+    INTR.fieldAt(1, intrError, maskRstVal = 0, doc = "Error interrupt (1: unmasked/open)")(SymbolName("error"))
   val irqFrameDoneStat = if (config.useAutoAdvance) {
-    INTR.fieldAt(2, intrFrameDone, maskRstVal = 0, doc = "Frame done interrupt (1: unmasked/open)")(SymbolName("frame_done"))
+    INTR.fieldAt(2, intrFrameDone, maskRstVal = 0, doc = "Frame done interrupt (1: unmasked/open)")(
+      SymbolName("frame_done")
+    )
   } else null
-  
 
   val irqMerged = INTR.intr()
 
@@ -355,10 +394,10 @@ class AxiVisibilityDma(
   }
 
   // Discrete status & interrupt outputs
-  io.ready          := !dmaBusy
-  io.irq            := irqMerged 
-  io.irq_done       := INTR.RAW.readBits(0)
-  io.irq_error      := INTR.RAW.readBits(1)
+  io.ready := !dmaBusy
+  io.irq := irqMerged
+  io.irq_done := INTR.RAW.readBits(0)
+  io.irq_error := INTR.RAW.readBits(1)
   io.irq_frame_done := (if (config.useAutoAdvance) INTR.RAW.readBits(2) else False)
 
   when(IRQ_ENABLE && (intrDone || intrError || intrFrameDone)) {
@@ -388,37 +427,37 @@ class AxiVisibilityDma(
 
   val vbFifo = StreamFifo(
     dataType = Bits(config.wordsPerBeat bits),
-    depth    = config.vbFifoDepth
+    depth = config.vbFifoDepth
   )
 
-  vbFifo.io.push.valid   := rBuffered.valid
+  vbFifo.io.push.valid := rBuffered.valid
   vbFifo.io.push.payload := visBitsIn
-  rBuffered.ready        := vbFifo.io.push.ready
+  rBuffered.ready := vbFifo.io.push.ready
 
   // ===========================================================================
   // 3. AXI4 READ MASTER ENGINE (aclk domain)
   // Splits N 64-bit element reads into bursts, respecting 4KB DRAM boundaries
   // ===========================================================================
-  val arAddrReg        = Reg(UInt(config.addressWidth bits)) init (0)
+  val arAddrReg = Reg(UInt(config.addressWidth bits)) init (0)
   val arBeatsRemaining = Reg(UInt(32 bits)) init (0)
-  val rBeatsRemaining  = Reg(UInt(32 bits)) init (0)
+  val rBeatsRemaining = Reg(UInt(32 bits)) init (0)
   val outstandingReads = Reg(UInt(log2Up(config.maxOutstandingReads + 1) bits)) init (0)
 
   // 4KB boundary calculation for visibility buffer reads: address bits [11:0] cannot cross 4096 bytes
   val bytesTo4KbBoundary = U(4096, 13 bits) - arAddrReg(11 downto 0).resize(13)
   val beatsTo4KbBoundary = (bytesTo4KbBoundary >> config.vbBeatShift).resize(16)
-  val maxBurstBeats      = U(config.maxBurstLength, 16 bits)
+  val maxBurstBeats = U(config.maxBurstLength, 16 bits)
 
   val currentBurstLen = UInt(16 bits)
   currentBurstLen := arBeatsRemaining.min(beatsTo4KbBoundary.resized).min(maxBurstBeats.resized).resized
 
   val canIssueAr = (arBeatsRemaining > 0) && (outstandingReads < config.maxOutstandingReads)
   io.m_axi_vb.ar.valid := canIssueAr && dmaBusy
-  io.m_axi_vb.ar.addr  := arAddrReg
-  io.m_axi_vb.ar.len   := (currentBurstLen - 1).resized
-  io.m_axi_vb.ar.size  := U(config.vbBeatShift, 3 bits)
+  io.m_axi_vb.ar.addr := arAddrReg
+  io.m_axi_vb.ar.len := (currentBurstLen - 1).resized
+  io.m_axi_vb.ar.size := U(config.vbBeatShift, 3 bits)
   io.m_axi_vb.ar.burst := Axi4.burst.INCR
-  io.m_axi_vb.ar.id    := 0
+  io.m_axi_vb.ar.id := 0
   if (config.getAxi4ReadConfig.useRegion) io.m_axi_vb.ar.region.clearAll()
   if (config.getAxi4ReadConfig.useLock) io.m_axi_vb.ar.lock.clearAll()
   if (config.getAxi4ReadConfig.useCache) io.m_axi_vb.ar.cache := B"0011"
@@ -426,12 +465,12 @@ class AxiVisibilityDma(
   if (config.getAxi4ReadConfig.useQos) io.m_axi_vb.ar.qos.clearAll()
 
   val arFire = io.m_axi_vb.ar.fire
-  val rFire  = io.m_axi_vb.r.fire
-  val rLast  = io.m_axi_vb.r.last
+  val rFire = io.m_axi_vb.r.fire
+  val rLast = io.m_axi_vb.r.last
 
   when(arFire) {
     val burstBytes = currentBurstLen << config.vbBeatShift
-    arAddrReg        := arAddrReg + burstBytes.resized
+    arAddrReg := arAddrReg + burstBytes.resized
     arBeatsRemaining := arBeatsRemaining - currentBurstLen.resized
   }
 
@@ -441,13 +480,12 @@ class AxiVisibilityDma(
     outstandingReads := outstandingReads - 1
   }
 
-
   when(rFire) {
     rBeatsRemaining := rBeatsRemaining - 1
     when(io.m_axi_vb.r.resp === Axi4.resp.SLVERR || io.m_axi_vb.r.resp === Axi4.resp.DECERR) {
       axiReadError := True
-      ERROR        := True
-      intrError    := True
+      ERROR := True
+      intrError := True
     }
   }
 
@@ -459,17 +497,17 @@ class AxiVisibilityDma(
 
   val cmdStreamOut = if (isDualClock) {
     val cc = StreamFifoCC(
-      dataType  = DataMoverCmdCompact(config.triWordAddrWidth, config.bttTriCountWidth),
-      depth     = config.cmdFifoDepth,
+      dataType = DataMoverCmdCompact(config.triWordAddrWidth, config.bttTriCountWidth),
+      depth = config.cmdFifoDepth,
       pushClock = clockDomain,
-      popClock  = dmClock
+      popClock = dmClock
     )
     cc.io.push <> cmdStreamInternal
     cc.io.pop
   } else {
     val sync = StreamFifo(
       dataType = DataMoverCmdCompact(config.triWordAddrWidth, config.bttTriCountWidth),
-      depth    = config.cmdFifoDepth
+      depth = config.cmdFifoDepth
     )
     sync.io.push <> cmdStreamInternal
     sync.io.pop
@@ -505,9 +543,9 @@ class AxiVisibilityDma(
       cmdPayload(32 + config.addressWidth - 1 downto 32) := startByteAddr.asBits
     }
 
-    io.m_axis_datamover_cmd.valid   := cmdStreamOut.valid
+    io.m_axis_datamover_cmd.valid := cmdStreamOut.valid
     io.m_axis_datamover_cmd.payload := cmdPayload
-    cmdStreamOut.ready              := io.m_axis_datamover_cmd.ready
+    cmdStreamOut.ready := io.m_axis_datamover_cmd.ready
   }
 
   // ===========================================================================
@@ -516,17 +554,17 @@ class AxiVisibilityDma(
   // ===========================================================================
   val stsStreamInternal = if (isDualClock) {
     val ccSts = StreamFifoCC(
-      dataType  = Bits(config.stsWidth bits),
-      depth     = config.stsFifoDepth,
+      dataType = Bits(config.stsWidth bits),
+      depth = config.stsFifoDepth,
       pushClock = dmClock,
-      popClock  = clockDomain
+      popClock = clockDomain
     )
     ccSts.io.push <> io.s_axis_datamover_sts
     ccSts.io.pop
   } else {
     val syncSts = StreamFifo(
       dataType = Bits(config.stsWidth bits),
-      depth    = config.stsFifoDepth
+      depth = config.stsFifoDepth
     )
     syncSts.io.push <> io.s_axis_datamover_sts
     syncSts.io.pop
@@ -545,12 +583,12 @@ class AxiVisibilityDma(
     // sts[6] = SLVERR
     // sts[5] = DECERR
     // sts[4] = INTERR
-    val isOkay   = stsByte(7)
+    val isOkay = stsByte(7)
     val hasError = !isOkay || stsByte(6 downto 4) =/= 0
     when(hasError) {
       dmErrorFlag := True
-      ERROR       := True
-      intrError   := True
+      ERROR := True
+      intrError := True
     }
   }
 
@@ -559,35 +597,35 @@ class AxiVisibilityDma(
   // Continually aggregates contiguous visible triangles; only limited by BTT!
   // ===========================================================================
   // Note: activeTileIdx declared above vbFifo
-  val triCounter         = Reg(UInt(32 bits)) init (0)
-  val shadowTriCount     = Reg(UInt(32 bits)) init (0)
-  val shadowTriWordBase  = Reg(UInt(config.triWordAddrWidth bits)) init (0)
+  val triCounter = Reg(UInt(32 bits)) init (0)
+  val shadowTriCount = Reg(UInt(32 bits)) init (0)
+  val shadowTriWordBase = Reg(UInt(config.triWordAddrWidth bits)) init (0)
   val shadowMaxTriangles = Reg(UInt(config.bttTriCountWidth bits)) init (config.maxBttTriangles)
-  val tagCounter         = Reg(UInt(4 bits)) init (0)
+  val tagCounter = Reg(UInt(4 bits)) init (0)
 
   // Aggregation state variables
-  val runActive    = RegInit(False)
+  val runActive = RegInit(False)
   val runStartWord = Reg(UInt(config.triWordAddrWidth bits)) init (0)
-  val runLength    = Reg(UInt(config.bttTriCountWidth bits)) init (0)
+  val runLength = Reg(UInt(config.bttTriCountWidth bits)) init (0)
 
   // 1-bit visibility signals for 2 triangles per cycle
   val isParallel2 = (config.trianglesPerCycle == 2) && (config.wordsPerBeat >= 2)
 
-  val triIdx0   = triCounter
-  val triIdx1   = triCounter + 1
-  val isValid0  = (triIdx0 < shadowTriCount)
-  val isValid1  = (triIdx1 < shadowTriCount)
+  val triIdx0 = triCounter
+  val triIdx1 = triCounter + 1
+  val isValid0 = (triIdx0 < shadowTriCount)
+  val isValid1 = (triIdx1 < shadowTriCount)
 
-  val rawV0     = vbFifo.io.pop.payload(0)
-  val rawV1     = if (config.wordsPerBeat >= 2) vbFifo.io.pop.payload(1) else False
+  val rawV0 = vbFifo.io.pop.payload(0)
+  val rawV1 = if (config.wordsPerBeat >= 2) vbFifo.io.pop.payload(1) else False
 
   // Mask v1 if beyond shadowTriCount (odd triangle count on last beat)
-  val v0        = rawV0 && isValid0
-  val v1        = rawV1 && isValid1
+  val v0 = rawV0 && isValid0
+  val v1 = rawV1 && isValid1
 
   val isLastBeat = (triCounter + 2 >= shadowTriCount)
   val isLastTri1 = (triIdx1 === (shadowTriCount - 1))
-  val stepCount  = Mux(isValid1, U(2, 32 bits), U(1, 32 bits))
+  val stepCount = Mux(isValid1, U(2, 32 bits), U(1, 32 bits))
 
   // Sub-word slicer when trianglesPerCycle == 1 and wordsPerBeat > 1
   val sliceIdx = Reg(UInt(log2Up(config.wordsPerBeat max 2) bits)) init (0)
@@ -606,17 +644,17 @@ class AxiVisibilityDma(
   val triStep = False
 
   // Default stream controls:
-  vbFifo.io.pop.ready                  := False
-  cmdStreamInternal.valid              := False
-  cmdStreamInternal.payload.triWordAddr:= runStartWord
-  cmdStreamInternal.payload.triCount   := runLength
-  cmdStreamInternal.payload.tag        := tagCounter.asBits
+  vbFifo.io.pop.ready := False
+  cmdStreamInternal.valid := False
+  cmdStreamInternal.payload.triWordAddr := runStartWord
+  cmdStreamInternal.payload.triCount := runLength
+  cmdStreamInternal.payload.tag := tagCounter.asBits
 
   def pushCmd(addr: UInt, count: UInt): Unit = {
-    cmdStreamInternal.valid              := True
-    cmdStreamInternal.payload.triWordAddr:= addr
-    cmdStreamInternal.payload.triCount   := count
-    cmdStreamInternal.payload.tag        := tagCounter.asBits
+    cmdStreamInternal.valid := True
+    cmdStreamInternal.payload.triWordAddr := addr
+    cmdStreamInternal.payload.triCount := count
+    cmdStreamInternal.payload.tag := tagCounter.asBits
   }
 
   object FilterState extends SpinalEnum {
@@ -625,43 +663,46 @@ class AxiVisibilityDma(
   val filterState = RegInit(FilterState.IDLE)
 
   when(SOFT_RESET) {
-    filterState      := FilterState.IDLE
-    dmaBusy          := False
-    axiReadError     := False
-    dmErrorFlag      := False
-    statVisCount     := 0
-    statCmdCount     := 0
-    statStsCount     := 0
-    runActive        := False
-    runLength        := 0
+    filterState := FilterState.IDLE
+    dmaBusy := False
+    axiReadError := False
+    dmErrorFlag := False
+    statVisCount := 0
+    statCmdCount := 0
+    statStsCount := 0
+    runActive := False
+    runLength := 0
     outstandingReads := 0
-    sliceIdx         := 0
+    sliceIdx := 0
   }.otherwise {
     switch(filterState) {
       is(FilterState.IDLE) {
         when(START && !dmaBusy) {
-          dmaBusy          := True
-          DONE             := False
-          ERROR            := False
-          IRQ_STATUS       := False
+          dmaBusy := True
+          DONE := False
+          ERROR := False
+          IRQ_STATUS := False
           if (config.useAutoAdvance) FRAME_DONE := False
-          axiReadError     := False
-          dmErrorFlag      := False
-          cycleCounter     := 0
-          statVisCount     := 0
-          statCmdCount     := 0
-          statStsCount     := 0
-          tagCounter       := 0
-          runActive        := False
-          runLength        := 0
-          sliceIdx         := 0
+          axiReadError := False
+          dmErrorFlag := False
+          cycleCounter := 0
+          statVisCount := 0
+          statCmdCount := 0
+          statStsCount := 0
+          tagCounter := 0
+          runActive := False
+          runLength := 0
+          sliceIdx := 0
 
-          activeTileIdx      := TILE_INDEX
-          shadowTriCount     := TRI_COUNT
-          shadowTriWordBase  := fullTriWordAddr
+          activeTileIdx := TILE_INDEX
+          shadowTriCount := TRI_COUNT
+          shadowTriWordBase := fullTriWordAddr
 
           // Sizing limitation is ONLY the BTT capacity
-          shadowMaxTriangles := (BTT_LIMIT_TRI === 0) ? U(config.maxBttTriangles, config.bttTriCountWidth bits) | BTT_LIMIT_TRI
+          shadowMaxTriangles := (BTT_LIMIT_TRI === 0) ? U(
+            config.maxBttTriangles,
+            config.bttTriCountWidth bits
+          ) | BTT_LIMIT_TRI
 
           // Setup AXI4 Visibility Buffer Reader
           arAddrReg := fullVbBaseAddr
@@ -673,8 +714,8 @@ class AxiVisibilityDma(
             totalBeats := ((TRI_COUNT + (config.wordsPerBeat - 1)) >> beatShift).resized
           }
           arBeatsRemaining := totalBeats
-          rBeatsRemaining  := totalBeats
-          triCounter       := 0
+          rBeatsRemaining := totalBeats
+          triCounter := 0
 
           when(TRI_COUNT === 0) {
             filterState := FilterState.ADVANCE_TILE
@@ -695,19 +736,19 @@ class AxiVisibilityDma(
                 when(runActive) {
                   pushCmd(runStartWord, runLength)
                   when(cmdStreamInternal.ready) {
-                    statCmdCount        := statCmdCount + 1
-                    tagCounter          := tagCounter + 1
-                    runActive           := False
-                    runLength           := 0
+                    statCmdCount := statCmdCount + 1
+                    tagCounter := tagCounter + 1
+                    runActive := False
+                    runLength := 0
                     vbFifo.io.pop.ready := True
-                    triCounter          := triCounter + stepCount
+                    triCounter := triCounter + stepCount
                     when(isLastBeat) {
                       filterState := FilterState.WAIT_RETIRE
                     }
                   }
                 }.otherwise {
                   vbFifo.io.pop.ready := True
-                  triCounter          := triCounter + stepCount
+                  triCounter := triCounter + stepCount
                   when(isLastBeat) {
                     filterState := FilterState.WAIT_RETIRE
                   }
@@ -723,38 +764,38 @@ class AxiVisibilityDma(
                   pushCmd(runStartWord, runLength)
                   when(cmdStreamInternal.ready) {
                     statCmdCount := statCmdCount + 1
-                    tagCounter   := tagCounter + 1
+                    tagCounter := tagCounter + 1
                     when(isLastTri1) {
                       // v1 is also last: flush previous run, next cycle flushes v1
                       runActive := False
                       runLength := 0
                     }.otherwise {
-                      runActive           := True
-                      runStartWord        := shadowTriWordBase + triIdx1.resized
-                      runLength           := 1
-                      statVisCount        := statVisCount + 1
+                      runActive := True
+                      runStartWord := shadowTriWordBase + triIdx1.resized
+                      runLength := 1
+                      statVisCount := statVisCount + 1
                       vbFifo.io.pop.ready := True
-                      triCounter          := triCounter + stepCount
+                      triCounter := triCounter + stepCount
                     }
                   }
                 }.otherwise {
                   when(isLastTri1) {
                     pushCmd(shadowTriWordBase + triIdx1.resized, 1)
                     when(cmdStreamInternal.ready) {
-                      statCmdCount        := statCmdCount + 1
-                      tagCounter          := tagCounter + 1
-                      statVisCount        := statVisCount + 1
+                      statCmdCount := statCmdCount + 1
+                      tagCounter := tagCounter + 1
+                      statVisCount := statVisCount + 1
                       vbFifo.io.pop.ready := True
-                      triCounter          := triCounter + stepCount
-                      filterState         := FilterState.WAIT_RETIRE
+                      triCounter := triCounter + stepCount
+                      filterState := FilterState.WAIT_RETIRE
                     }
                   }.otherwise {
-                    runActive           := True
-                    runStartWord        := shadowTriWordBase + triIdx1.resized
-                    runLength           := 1
-                    statVisCount        := statVisCount + 1
+                    runActive := True
+                    runStartWord := shadowTriWordBase + triIdx1.resized
+                    runLength := 1
+                    statVisCount := statVisCount + 1
                     vbFifo.io.pop.ready := True
-                    triCounter          := triCounter + stepCount
+                    triCounter := triCounter + stepCount
                   }
                 }
               }
@@ -769,13 +810,13 @@ class AxiVisibilityDma(
                     val totalRun = (runLength + 1).resize(config.bttTriCountWidth)
                     pushCmd(runStartWord, totalRun)
                     when(cmdStreamInternal.ready) {
-                      statCmdCount        := statCmdCount + 1
-                      tagCounter          := tagCounter + 1
-                      statVisCount        := statVisCount + 1
-                      runActive           := False
-                      runLength           := 0
+                      statCmdCount := statCmdCount + 1
+                      tagCounter := tagCounter + 1
+                      statVisCount := statVisCount + 1
+                      runActive := False
+                      runLength := 0
                       vbFifo.io.pop.ready := True
-                      triCounter          := triCounter + stepCount
+                      triCounter := triCounter + stepCount
                       when(isLastBeat) {
                         filterState := FilterState.WAIT_RETIRE
                       }
@@ -784,19 +825,19 @@ class AxiVisibilityDma(
                     pushCmd(runStartWord, runLength)
                     when(cmdStreamInternal.ready) {
                       statCmdCount := statCmdCount + 1
-                      tagCounter   := tagCounter + 1
-                      runActive    := False
-                      runLength    := 0
+                      tagCounter := tagCounter + 1
+                      runActive := False
+                      runLength := 0
                     }
                   }
                 }.otherwise {
                   pushCmd(shadowTriWordBase + triIdx0.resized, 1)
                   when(cmdStreamInternal.ready) {
-                    statCmdCount        := statCmdCount + 1
-                    tagCounter          := tagCounter + 1
-                    statVisCount        := statVisCount + 1
+                    statCmdCount := statCmdCount + 1
+                    tagCounter := tagCounter + 1
+                    statVisCount := statVisCount + 1
                     vbFifo.io.pop.ready := True
-                    triCounter          := triCounter + stepCount
+                    triCounter := triCounter + stepCount
                     when(isLastBeat) {
                       filterState := FilterState.WAIT_RETIRE
                     }
@@ -816,49 +857,49 @@ class AxiVisibilityDma(
                       val totalRun = (runLength + 2).resize(config.bttTriCountWidth)
                       pushCmd(runStartWord, totalRun)
                       when(cmdStreamInternal.ready) {
-                        statCmdCount        := statCmdCount + 1
-                        tagCounter          := tagCounter + 1
-                        statVisCount        := statVisCount + 2
-                        runActive           := False
-                        runLength           := 0
+                        statCmdCount := statCmdCount + 1
+                        tagCounter := tagCounter + 1
+                        statVisCount := statVisCount + 2
+                        runActive := False
+                        runLength := 0
                         vbFifo.io.pop.ready := True
-                        triCounter          := triCounter + stepCount
-                        filterState         := FilterState.WAIT_RETIRE
+                        triCounter := triCounter + stepCount
+                        filterState := FilterState.WAIT_RETIRE
                       }
                     }.otherwise {
-                      runLength           := runLength + 2
-                      statVisCount        := statVisCount + 2
+                      runLength := runLength + 2
+                      statVisCount := statVisCount + 2
                       vbFifo.io.pop.ready := True
-                      triCounter          := triCounter + stepCount
+                      triCounter := triCounter + stepCount
                     }
                   }.otherwise {
                     // Current run cannot fit 2 more triangles; flush current run first
                     pushCmd(runStartWord, runLength)
                     when(cmdStreamInternal.ready) {
                       statCmdCount := statCmdCount + 1
-                      tagCounter   := tagCounter + 1
-                      runActive    := False
-                      runLength    := 0
+                      tagCounter := tagCounter + 1
+                      runActive := False
+                      runLength := 0
                     }
                   }
                 }.otherwise {
                   when(isLastTri1) {
                     pushCmd(shadowTriWordBase + triIdx0.resized, 2)
                     when(cmdStreamInternal.ready) {
-                      statCmdCount        := statCmdCount + 1
-                      tagCounter          := tagCounter + 1
-                      statVisCount        := statVisCount + 2
+                      statCmdCount := statCmdCount + 1
+                      tagCounter := tagCounter + 1
+                      statVisCount := statVisCount + 2
                       vbFifo.io.pop.ready := True
-                      triCounter          := triCounter + stepCount
-                      filterState         := FilterState.WAIT_RETIRE
+                      triCounter := triCounter + stepCount
+                      filterState := FilterState.WAIT_RETIRE
                     }
                   }.otherwise {
-                    runActive           := True
-                    runStartWord        := shadowTriWordBase + triIdx0.resized
-                    runLength           := 2
-                    statVisCount        := statVisCount + 2
+                    runActive := True
+                    runStartWord := shadowTriWordBase + triIdx0.resized
+                    runLength := 2
+                    statVisCount := statVisCount + 2
                     vbFifo.io.pop.ready := True
-                    triCounter          := triCounter + stepCount
+                    triCounter := triCounter + stepCount
                   }
                 }
               }
@@ -870,16 +911,16 @@ class AxiVisibilityDma(
                 when(isLastTri) {
                   pushCmd(curTriWordAddr, 1)
                   when(cmdStreamInternal.ready) {
-                    triStep      := True
+                    triStep := True
                     statCmdCount := statCmdCount + 1
-                    tagCounter   := tagCounter + 1
-                    filterState  := FilterState.WAIT_RETIRE
+                    tagCounter := tagCounter + 1
+                    filterState := FilterState.WAIT_RETIRE
                   }
                 }.otherwise {
-                  runActive    := True
+                  runActive := True
                   runStartWord := curTriWordAddr
-                  runLength    := 1
-                  triStep      := True
+                  runLength := 1
+                  triStep := True
                 }
               }.otherwise {
                 val canExtend = (runLength < shadowMaxTriangles)
@@ -888,23 +929,23 @@ class AxiVisibilityDma(
                     val totalRunLen = (runLength + 1).resize(config.bttTriCountWidth)
                     pushCmd(runStartWord, totalRunLen)
                     when(cmdStreamInternal.ready) {
-                      triStep      := True
+                      triStep := True
                       statCmdCount := statCmdCount + 1
-                      tagCounter   := tagCounter + 1
-                      runActive    := False
-                      filterState  := FilterState.WAIT_RETIRE
+                      tagCounter := tagCounter + 1
+                      runActive := False
+                      filterState := FilterState.WAIT_RETIRE
                     }
                   }.otherwise {
                     runLength := runLength + 1
-                    triStep   := True
+                    triStep := True
                   }
                 }.otherwise {
                   pushCmd(runStartWord, runLength)
                   when(cmdStreamInternal.ready) {
                     statCmdCount := statCmdCount + 1
-                    tagCounter   := tagCounter + 1
-                    runActive    := False
-                    filterState  := FilterState.FLUSH_STALL
+                    tagCounter := tagCounter + 1
+                    runActive := False
+                    filterState := FilterState.FLUSH_STALL
                   }
                 }
               }
@@ -912,10 +953,10 @@ class AxiVisibilityDma(
               when(runActive) {
                 pushCmd(runStartWord, runLength)
                 when(cmdStreamInternal.ready) {
-                  triStep      := True
+                  triStep := True
                   statCmdCount := statCmdCount + 1
-                  tagCounter   := tagCounter + 1
-                  runActive    := False
+                  tagCounter := tagCounter + 1
+                  runActive := False
                   when(isLastTri) {
                     filterState := FilterState.WAIT_RETIRE
                   }
@@ -945,8 +986,8 @@ class AxiVisibilityDma(
 
       // Transfer complete: advance tile index and signal completion
       is(FilterState.ADVANCE_TILE) {
-        dmaBusy  := False
-        DONE     := True
+        dmaBusy := False
+        DONE := True
         intrDone := True
 
         when(IRQ_ENABLE) {
@@ -956,8 +997,8 @@ class AxiVisibilityDma(
         if (config.useAutoAdvance) {
           when(AUTO_ADV_EN) {
             when(TILE_INDEX === (config.gridTiles - 1)) {
-              TILE_INDEX    := 0
-              FRAME_DONE    := True
+              TILE_INDEX := 0
+              FRAME_DONE := True
               intrFrameDone := True
             }.otherwise {
               TILE_INDEX := TILE_INDEX + 1
@@ -974,7 +1015,7 @@ class AxiVisibilityDma(
       if (config.wordsPerBeat == 1) {
         when(triStep) {
           vbFifo.io.pop.ready := True
-          triCounter          := triCounter + 1
+          triCounter := triCounter + 1
           when(isVisible) {
             statVisCount := statVisCount + 1
           }
@@ -987,9 +1028,9 @@ class AxiVisibilityDma(
           }
           when(sliceIdx === (config.wordsPerBeat - 1) || isLastTri) {
             vbFifo.io.pop.ready := True
-            sliceIdx            := 0
+            sliceIdx := 0
           }.otherwise {
-            sliceIdx            := sliceIdx + 1
+            sliceIdx := sliceIdx + 1
           }
         }
       }
@@ -1003,19 +1044,19 @@ class AxiVisibilityDma(
 object AxiVisibilityDmaVerilog {
   def main(args: Array[String]): Unit = {
     val config = AxiVisibilityDmaConfig(
-      addressWidth         = 32,
-      axiDataWidth         = 128, // 128-bit AXI Read Master (configurable >= 64 bits)
-      bttWidth             = 23,  // Configurable up to 23 bits
-      gridWidth            = 10,
-      gridHeight           = 6,
-      vbWordBits           = 64,
-      triangleSizeBytes    = 128,
-      maxBurstLength       = 256,
-      maxOutstandingReads  = 8,
-      cmdFifoDepth         = 64,
-      stsFifoDepth         = 4,
-      vbFifoDepth          = 512, // >= maxBurstLength
-      useAutoAdvance       = true
+      addressWidth = 32,
+      axiDataWidth = 128, // 128-bit AXI Read Master (configurable >= 64 bits)
+      bttWidth = 23, // Configurable up to 23 bits
+      gridWidth = 10,
+      gridHeight = 6,
+      vbWordBits = 64,
+      triangleSizeBytes = 128,
+      maxBurstLength = 256,
+      maxOutstandingReads = 8,
+      cmdFifoDepth = 64,
+      stsFifoDepth = 4,
+      vbFifoDepth = 512, // >= maxBurstLength
+      useAutoAdvance = true
     )
 
     SpinalConfig(
