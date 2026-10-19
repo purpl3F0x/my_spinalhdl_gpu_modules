@@ -205,19 +205,11 @@ class AxiTileDma(
   val RESET_POS =
     if (config.useAutoAdvance) REG_CTRL.field(Bool(), W1P, doc = "Reset tile coordinates (TileX=0, TileY=0)") else null
   if (!config.useAutoAdvance) REG_CTRL.reserved(1 bits)
-  val IRQ_ENABLE = REG_CTRL.field(Bool(), RW, resetValue = 0, doc = "Interrupt enable on tile/frame completion")
   val SOFT_RESET = REG_CTRL.field(Bool(), W1P, doc = "Software reset for DMA FSM and internal pointers")
 
-  // 0x04: STATUS
+  // 0x04: STATUS (Operational status flags; interrupt events managed by INTR factory at 0x40)
   val REG_STATUS = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
   val BUSY = REG_STATUS.field(Bool(), RO, doc = "DMA active transfer busy flag")
-  val TILE_DONE = REG_STATUS.field(Bool(), W1C, doc = "Tile transfer complete (Write 1 to clear)")
-  val FRAME_DONE =
-    if (config.useAutoAdvance) REG_STATUS.field(Bool(), W1C, doc = "Final tile of frame complete (Write 1 to clear)")
-    else null
-  if (!config.useAutoAdvance) REG_STATUS.reserved(1 bits)
-  val ERROR = REG_STATUS.field(Bool(), W1C, doc = "AXI bus write error (Write 1 to clear)")
-  val IRQ_STATUS = REG_STATUS.field(Bool(), W1C, doc = "Interrupt request active (Write 1 to clear)")
   val LAST_BRESP = REG_STATUS.field(Bits(2 bits), RO, doc = "Last AXI write response status")
 
   BUSY := dmaBusy
@@ -532,7 +524,6 @@ class AxiTileDma(
 
   when(bFire) {
     when(io.m_axi.b.resp === Axi4.resp.SLVERR || io.m_axi.b.resp === Axi4.resp.DECERR) {
-      ERROR := True
       intrError := True
       brespVal := io.m_axi.b.resp
     }
@@ -556,8 +547,6 @@ class AxiTileDma(
       is(DmaState.IDLE) {
         when(START && !dmaBusy) {
           dmaBusy := True
-          TILE_DONE := False
-          IRQ_STATUS := False
           cycleCounter := 0
 
           shadowStride := STRIDE
@@ -637,11 +626,7 @@ class AxiTileDma(
       is(DmaState.WAIT_RESP) {
         when(outstandingBursts === 0) {
           dmaBusy := False
-          TILE_DONE := True
           intrDone := True
-          when(IRQ_ENABLE) {
-            IRQ_STATUS := True
-          }
           if (config.useAutoAdvance) {
             state := DmaState.ADVANCE_CALC_1
           } else {
@@ -674,7 +659,6 @@ class AxiTileDma(
             CUR_TILE_Y := 0
             tileOriginAddr := fullBaseAddr
             rowStartTileAddr := fullBaseAddr
-            FRAME_DONE := True
             intrFrameDone := True
           }.elsewhen(advIsLastInRow) {
             // Wrap down to the next tile row
@@ -696,14 +680,11 @@ class AxiTileDma(
   }
 
   // Discrete status & interrupt outputs
+  val rawBits = INTR.RAW.readBits
   io.irq := irqMerged
-  io.irq_done := INTR.RAW.readBits(0)
-  io.irq_error := INTR.RAW.readBits(1)
-  io.irq_frame_done := (if (config.useAutoAdvance) INTR.RAW.readBits(2) else False)
-
-  when(IRQ_ENABLE && (intrDone || intrError || intrFrameDone)) {
-    IRQ_STATUS := True
-  }
+  io.irq_done := rawBits(0)
+  io.irq_error := rawBits(1)
+  io.irq_frame_done := (if (config.useAutoAdvance) rawBits(2) else False)
 }
 
 // =============================================================================
@@ -793,13 +774,13 @@ object AxiTileDmaVerilog {
       maxOutstanding = 8,
       idWidth = 4,
       cdcDepth = 16, // 16-entry async CDC
-      bramReadLatency = 3
+      bramReadLatency = 4
     )
 
     SpinalConfig(
-      targetDirectory = "rtl",
+      targetDirectory = "rtl/AxiTileDma",
       defaultConfigForClockDomains = ClockDomainConfig(resetActiveLevel = LOW)
-    ).generateVerilog(
+    ).withPrivateNamespace.generateVerilog(
       new AxiTileDma(
         config = config,
         ramClockDomain = ClockDomain.external("ram", withReset = true)

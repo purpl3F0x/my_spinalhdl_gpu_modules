@@ -317,9 +317,9 @@ object AxiTileDmaSim extends App {
     axilDriver.write(0x10, frameRowStrideBytes) // STRIDE = 2048
     axilDriver.write(0x14, gridTilesX) // TILES_X = 4
     axilDriver.write(0x18, gridTilesY) // TILES_Y = 3
-    axilDriver.write(0x00, 0x04) // IRQ_ENABLE = 1
+    axilDriver.write(0x48, 0x00) // INTR_INT_MASK = 0 (unmask done, error, frame_done)
 
-    println("[AXI-Lite] Initialized BaseAddr, Stride, TilesX, TilesY registers.")
+    println("[AXI-Lite] Initialized BaseAddr, Stride, TilesX, TilesY, and Interrupt Mask registers.")
 
     val totalTiles = gridTilesX * gridTilesY
     var tileCount = 0
@@ -350,42 +350,41 @@ object AxiTileDmaSim extends App {
         }
 
         // 2. Trigger DMA Start via AXI-Lite
-        axilDriver.write(0x00, 0x05) // START (bit 0) | IRQ_ENABLE (bit 2)
+        axilDriver.write(0x00, 0x01) // START (bit 0)
 
-        // 3. Poll Status register until TILE_DONE (bit 1) is asserted
+        // 3. Poll Interrupt RAW register (0x40) until DONE (bit 0) is asserted
         var status = 0L
         var pollCycles = 0
         do {
           axiClock.waitSampling(10)
-          status = axilDriver.read(0x04)
+          status = axilDriver.read(0x40) // INTR_INT_RAW (bit 0 = done, bit 1 = error, bit 2 = frame_done)
           pollCycles += 10
           if (pollCycles % 2000 == 0) {
             val perf = axilDriver.read(0x24)
             val pos = axilDriver.read(0x1c)
             println(
-              s"    [Poll $pollCycles] Status=0x${status.toHexString}, PerfCycles=$perf, Pos=0x${pos.toHexString}"
+              s"    [Poll $pollCycles] RawIntr=0x${status.toHexString}, PerfCycles=$perf, Pos=0x${pos.toHexString}"
             )
           }
-        } while ((status & 0x02) == 0 && pollCycles < 50000)
+        } while ((status & 0x01) == 0 && pollCycles < 50000)
 
-        assert((status & 0x02) != 0, s"Timeout waiting for Tile ($tileX, $tileY) to finish!")
+        assert((status & 0x01) != 0, s"Timeout waiting for Tile ($tileX, $tileY) to finish!")
         val perfCycles = axilDriver.read(0x24)
         val curPos = axilDriver.read(0x1c)
         val nextX = curPos & 0xffff
         val nextY = (curPos >> 16) & 0xffff
 
-        println(f"    Completed in $perfCycles cycles. Status=0x$status%X. Next Tile Pos=($nextX, $nextY)")
+        println(f"    Completed in $perfCycles cycles. RawIntr=0x$status%X. Next Tile Pos=($nextX, $nextY)")
 
-        // Clear DONE status flag
-        axilDriver.write(0x04, 0x02)
-
-        val finalStatus = axilDriver.read(0x04)
+        // Clear DONE raw interrupt flag (W1C at 0x40)
+        axilDriver.write(0x40, 0x01)
 
         // Check FRAME_DONE on the very last tile (3, 2)
         if (tileX == gridTilesX - 1 && tileY == gridTilesY - 1) {
-          assert((finalStatus & 0x04) != 0, "FRAME_DONE bit (0x04) must be asserted on final tile completion!")
+          assert((status & 0x04) != 0, "FRAME_DONE bit (0x04 in INTR_INT_RAW) must be asserted on final tile completion!")
           assert(nextX == 0 && nextY == 0, "Tile coordinates must wrap back to (0,0) after frame completion!")
           println("    >> FRAME_DONE successfully asserted and coordinates wrapped to (0,0)!")
+          axilDriver.write(0x40, 0x04) // Clear FRAME_DONE raw interrupt flag
         }
       }
     }
