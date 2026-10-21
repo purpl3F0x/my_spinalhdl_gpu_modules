@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba3.apb._
 import scala.collection.mutable
 
 // =============================================================================
@@ -182,7 +182,7 @@ object AxiVisibilityDmaSim extends App {
   simConfig.compile(new AxiVisibilityDma(config)).doSim("AxiVisibilityDma_Test") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
 
-    val axilDriver = new SimAxiLiteDriver(dut.io.s_axil_ctrl, dut.clockDomain)
+    val apbDriver = new SimApbDriver(dut.io.s_apb, dut.clockDomain)
     val vbMemory = new AxiReadOnlyMemorySim(dut.io.m_axi_vb, dut.clockDomain)
     val dmResponder = new SimDataMoverResponder(
       cmdStream = dut.io.m_axis_datamover_cmd,
@@ -191,7 +191,7 @@ object AxiVisibilityDmaSim extends App {
       addressWidth = config.addressWidth
     )
 
-    axilDriver.reset()
+    apbDriver.reset()
     vbMemory.start()
     dmResponder.start()
 
@@ -202,14 +202,14 @@ object AxiVisibilityDmaSim extends App {
     println("=================================================================")
 
     // Triangle Geometry Base Address = 0x8000_1000 (lower 7 bits are 0x00)
-    axilDriver.write(0x10, 0x8000107fL)
-    val readTriLow = axilDriver.read(0x10)
+    apbDriver.write(0x10, 0x8000107fL)
+    val readTriLow = apbDriver.read(0x10)
     println(f"Wrote TRI_BASE_LOW: 0x8000107F, Read Back: 0x$readTriLow%08X (Lower 7 bits must be 0)")
     assert((readTriLow & 0x7f) == 0, "Error: lower 7 bits of TRI_BASE_LOW were not ignored!")
 
     // Visibility Buffer Base Address = 0x4000_2000 (lower 4 bits are 0 for 128-bit)
-    axilDriver.write(0x08, 0x4000200fL)
-    val readVbLow = axilDriver.read(0x08)
+    apbDriver.write(0x08, 0x4000200fL)
+    val readVbLow = apbDriver.read(0x08)
     println(f"Wrote VB_BASE_LOW: 0x4000200F, Read Back: 0x$readVbLow%08X (Lower 4 bits must be 0 for 128-bit AXI)")
     assert((readVbLow & 0x0f) == 0, "Error: lower 4 bits of VB_BASE_LOW were not ignored!")
 
@@ -223,10 +223,10 @@ object AxiVisibilityDmaSim extends App {
     val vbBaseAddr = 0x40000000L
     val triBaseAddr = 0x80000000L
 
-    axilDriver.write(0x08, vbBaseAddr)
-    axilDriver.write(0x10, triBaseAddr)
-    axilDriver.write(0x18, N) // TRI_COUNT = 16
-    axilDriver.write(0x1c, 0) // TILE_INDEX = 0
+    apbDriver.write(0x08, vbBaseAddr)
+    apbDriver.write(0x10, triBaseAddr)
+    apbDriver.write(0x18, N) // TRI_COUNT = 16
+    apbDriver.write(0x1c, 0) // TILE_INDEX = 0
 
     // Visibility pattern for Tile 0 (bit 0):
     // Tri 0..2: Visible (3 consecutive)  -> Cmd 0: Addr = 0x8000_0000, BTT = 3 * 128 = 384 bytes
@@ -261,13 +261,13 @@ object AxiVisibilityDmaSim extends App {
 
     // Enable IRQ and Auto-Advance in CTRL (IRQ_EN=1, AUTO_ADV_EN=1): 0x0D
     println("Triggering START for Tile 0...")
-    axilDriver.write(0x00, 0x0d)
+    apbDriver.write(0x00, 0x0d)
 
     var timeout = 500
     var done = false
     while (!done && timeout > 0) {
       dut.clockDomain.waitSampling(5)
-      val status = axilDriver.read(0x04)
+      val status = apbDriver.read(0x04)
       done = (status & 0x02) != 0 // Bit 1 = DONE
       timeout -= 1
     }
@@ -280,9 +280,9 @@ object AxiVisibilityDmaSim extends App {
     assert(dut.io.ready.toBoolean, "Error: ready output must be high when idle!")
 
     // Read status counters
-    val visCount = axilDriver.read(0x24)
-    val cmdCount = axilDriver.read(0x28)
-    val stsCount = axilDriver.read(0x2c)
+    val visCount = apbDriver.read(0x24)
+    val cmdCount = apbDriver.read(0x28)
+    val stsCount = apbDriver.read(0x2c)
     println(f"STAT_VIS: $visCount, STAT_CMD: $cmdCount, STAT_STS: $stsCount")
     println("Verifying issued DataMover commands (Unchunked):")
     for ((cmd, idx) <- dmResponder.receivedCommands.zipWithIndex) {
@@ -308,39 +308,40 @@ object AxiVisibilityDmaSim extends App {
     println("=================================================================")
     println("Test 3: Tile Auto-Advancement to Tile 1")
     println("=================================================================")
-    val curTileIdx = axilDriver.read(0x1c)
+    val curTileIdx = apbDriver.read(0x1c)
     println(f"Current TILE_INDEX after auto-advance: $curTileIdx (Expected 1)")
     assert(curTileIdx == 1, f"Expected TILE_INDEX == 1, got $curTileIdx")
 
     // Clear DONE and IRQ (Write 1 to clear)
-    axilDriver.write(0x04, 0x0a)
+    apbDriver.write(0x04, 0x0a)
+    apbDriver.write(0x40, 0x07) // INTR_INT_RAW W1C (done, error, frame_done) drives io.irq
     dut.clockDomain.waitSampling(2)
     assert(!dut.io.irq.toBoolean, "Error: IRQ should be deasserted after W1C clear!")
 
     dmResponder.receivedCommands.clear()
 
     println("Triggering START for Tile 1...")
-    axilDriver.write(0x00, 0x0d)
+    apbDriver.write(0x00, 0x0d)
 
     timeout = 500
     done = false
     while (!done && timeout > 0) {
       dut.clockDomain.waitSampling(5)
-      val status = axilDriver.read(0x04)
+      val status = apbDriver.read(0x04)
       done = (status & 0x02) != 0
       timeout -= 1
     }
     assert(done, "Timeout waiting for Tile 1 transfer completion!")
     println("Tile 1 transfer completed!")
 
-    val visCountTile1 = axilDriver.read(0x24)
-    val cmdCountTile1 = axilDriver.read(0x28)
+    val visCountTile1 = apbDriver.read(0x24)
+    val cmdCountTile1 = apbDriver.read(0x28)
     println(f"Tile 1 STAT_VIS: $visCountTile1, STAT_CMD: $cmdCountTile1")
     assert(visCountTile1 == 2, f"Expected 2 visible triangles in Tile 1, got $visCountTile1")
     assert(cmdCountTile1 == 1, f"Expected 1 merged command in Tile 1, got $cmdCountTile1")
     assert(dmResponder.receivedCommands(0).btt == 256, "Tile 1 BTT should be 256 bytes")
 
-    val nextTileIdx = axilDriver.read(0x1c)
+    val nextTileIdx = apbDriver.read(0x1c)
     println(f"Current TILE_INDEX after second auto-advance: $nextTileIdx (Expected 2)")
     assert(nextTileIdx == 2, f"Expected TILE_INDEX == 2, got $nextTileIdx")
 
@@ -348,11 +349,12 @@ object AxiVisibilityDmaSim extends App {
     println("Test 4: Odd Triangle Count (N = 13) with 128-bit AXI Master")
     println("=================================================================")
     // Clear DONE and IRQ
-    axilDriver.write(0x04, 0x0a)
+    apbDriver.write(0x04, 0x0a)
+    apbDriver.write(0x40, 0x07) // INTR_INT_RAW W1C (done, error, frame_done) drives io.irq
     dut.clockDomain.waitSampling(2)
 
     val oddN = 13
-    axilDriver.write(0x18, oddN) // TRI_COUNT = 13
+    apbDriver.write(0x18, oddN) // TRI_COUNT = 13
     dmResponder.receivedCommands.clear()
 
     // Visibility pattern for Tile 2 (bit 2):
@@ -375,21 +377,21 @@ object AxiVisibilityDmaSim extends App {
     }
 
     println("Triggering START for Tile 2 (Odd N = 13)...")
-    axilDriver.write(0x00, 0x0d)
+    apbDriver.write(0x00, 0x0d)
 
     timeout = 500
     done = false
     while (!done && timeout > 0) {
       dut.clockDomain.waitSampling(5)
-      val status = axilDriver.read(0x04)
+      val status = apbDriver.read(0x04)
       done = (status & 0x02) != 0
       timeout -= 1
     }
     assert(done, "Timeout waiting for Tile 2 transfer completion!")
     println("Tile 2 transfer completed!")
 
-    val visCountTile2 = axilDriver.read(0x24)
-    val cmdCountTile2 = axilDriver.read(0x28)
+    val visCountTile2 = apbDriver.read(0x24)
+    val cmdCountTile2 = apbDriver.read(0x28)
     println(f"Tile 2 STAT_VIS: $visCountTile2, STAT_CMD: $cmdCountTile2")
     assert(visCountTile2 == 7, f"Expected 7 visible triangles in Tile 2, got $visCountTile2")
     assert(cmdCountTile2 == 3, f"Expected 3 commands in Tile 2, got $cmdCountTile2")
@@ -397,7 +399,7 @@ object AxiVisibilityDmaSim extends App {
     assert(dmResponder.receivedCommands(1).btt == 512, "Cmd 1 BTT should be 512 bytes")
     assert(dmResponder.receivedCommands(2).btt == 128, "Cmd 2 BTT should be 128 bytes")
 
-    val finalTileIdx = axilDriver.read(0x1c)
+    val finalTileIdx = apbDriver.read(0x1c)
     println(f"Current TILE_INDEX after third auto-advance: $finalTileIdx (Expected 3)")
     assert(finalTileIdx == 3, f"Expected TILE_INDEX == 3, got $finalTileIdx")
 

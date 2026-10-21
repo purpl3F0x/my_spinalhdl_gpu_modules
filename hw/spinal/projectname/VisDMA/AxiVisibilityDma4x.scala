@@ -3,7 +3,7 @@ package projectname
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba3.apb._
 import spinal.lib.bus.regif._
 import spinal.lib.bus.regif.AccessType._
 import spinal.lib.fsm._
@@ -78,8 +78,8 @@ case class AxiVisibilityDma4xConfig(
     useId = true
   )
 
-  def getAxiLiteConfig: AxiLite4Config = AxiLite4Config(
-    addressWidth = 8,
+  def getApbConfig: Apb3Config = Apb3Config(
+    addressWidth = 7,
     dataWidth = 32
   )
 }
@@ -145,8 +145,8 @@ class AxiVisibilityDma4x(
   val isDualClock = (dmClockDomain != null) && (dmClockDomain != ClockDomain.current)
 
   val io = new Bundle {
-    // 1. AXI-Lite Slave Interface for Register Programming (aclk domain)
-    val s_axil_ctrl = slave(AxiLite4(config.getAxiLiteConfig))
+    // 1. APB3 Slave Interface for Register Programming (aclk domain)
+    val s_apb = slave(Apb3(config.getApbConfig))
 
     // 2. AXI4 Read Master Interface for Visibility Buffer (aclk domain)
     val m_axi_vb = master(Axi4ReadOnly(config.getAxi4ReadConfig))
@@ -191,20 +191,9 @@ class AxiVisibilityDma4x(
     stream.payload.addAttribute("X_INTERFACE_INFO", s"xilinx.com:interface:axis:1.0 ${prefix} TDATA")
   }
 
-  renameAxiForVivado(io.s_axil_ctrl, "s_axil_ctrl")
   renameAxiForVivado(io.m_axi_vb, "m_axi_vb")
   renameAxisForVivado(io.m_axis_datamover_cmd, "m_axis_datamover_cmd")
   renameAxisForVivado(io.s_axis_datamover_sts, "s_axis_datamover_sts")
-
-  io.s_axil_ctrl.flatten.foreach { sig =>
-    val name = sig.getName()
-    val suffix = name.replace("s_axil_ctrl_", "").toUpperCase
-    sig.addAttribute("X_INTERFACE_INFO", s"xilinx.com:interface:aximm:1.0 s_axil_ctrl $suffix")
-  }
-  io.s_axil_ctrl.ar.valid.addAttribute(
-    "X_INTERFACE_PARAMETER",
-    "READ_WRITE_MODE READ_WRITE, NUM_READ_OUTSTANDING 1, NUM_WRITE_OUTSTANDING 1"
-  )
 
   io.m_axi_vb.flatten.foreach { sig =>
     val name = sig.getName()
@@ -231,9 +220,9 @@ class AxiVisibilityDma4x(
   clockDomain.clock.addAttribute(
     "X_INTERFACE_PARAMETER",
     if (isDualClock) {
-      "ASSOCIATED_BUSIF s_axil_ctrl:m_axi_vb, ASSOCIATED_RESET aresetn"
+      "ASSOCIATED_BUSIF m_axi_vb, ASSOCIATED_RESET aresetn"
     } else {
-      "ASSOCIATED_BUSIF s_axil_ctrl:m_axi_vb:m_axis_datamover_cmd:s_axis_datamover_sts, ASSOCIATED_RESET aresetn"
+      "ASSOCIATED_BUSIF m_axi_vb:m_axis_datamover_cmd:s_axis_datamover_sts, ASSOCIATED_RESET aresetn"
     }
   )
   clockDomain.reset.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 aresetn RST")
@@ -252,9 +241,9 @@ class AxiVisibilityDma4x(
   }
 
   // ===========================================================================
-  // 1. AXI-LITE REGISTER INTERFACE (via SpinalHDL regif)
+  // 1. APB3 REGISTER INTERFACE (via SpinalHDL regif)
   // ===========================================================================
-  val busif = AxiLite4BusInterface(io.s_axil_ctrl, (0x0000, 256), "AXI_VISIBILITY_DMA4X")
+  val busif = Apb3BusInterface(io.s_apb, (0x0000, 128), "AXI_VISIBILITY_DMA4X")
 
   val dmaBusy      = RegInit(False)
   val axiReadError = RegInit(False)

@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba3.apb._
 import scala.collection.mutable
 
 // =============================================================================
@@ -111,64 +111,41 @@ class AxiWriteOnlyMemorySim(axi: Axi4WriteOnly, clockDomain: ClockDomain) {
 }
 
 // =============================================================================
-// SpinalHDL AXI-Lite Simulation Driver for Control Slave Interface
+// SpinalHDL APB3 Simulation Driver for Control Slave Interface
 // =============================================================================
-class SimAxiLiteDriver(axil: AxiLite4, clockDomain: ClockDomain) {
+class SimApbDriver(apb: Apb3, clockDomain: ClockDomain) {
   def reset(): Unit = {
-    axil.aw.valid #= false
-    axil.w.valid #= false
-    axil.b.ready #= true
-    axil.ar.valid #= false
-    axil.r.ready #= true
+    apb.PSEL #= 0
+    apb.PENABLE #= false
+    apb.PWRITE #= false
+    apb.PADDR #= 0
+    apb.PWDATA #= 0
   }
 
-  def write(address: Long, data: Long): Unit = {
-    axil.aw.valid #= true
-    axil.aw.payload.addr #= address
-    axil.w.valid #= true
-    axil.w.payload.data #= data
-    axil.w.payload.strb #= 0xf
-    axil.b.ready #= true
-
-    var awDone = false
-    var wDone = false
-    while (!awDone || !wDone) {
-      clockDomain.waitSampling()
-      if (axil.aw.ready.toBoolean) {
-        axil.aw.valid #= false
-        awDone = true
-      }
-      if (axil.w.ready.toBoolean) {
-        axil.w.valid #= false
-        wDone = true
-      }
-    }
-
-    while (!axil.b.valid.toBoolean) {
-      clockDomain.waitSampling()
-    }
-    axil.b.ready #= false
+  // SETUP phase, then ACCESS phase until PREADY; returns PRDATA sampled on completion
+  private def transfer(address: Long, write: Boolean, data: Long): Long = {
+    apb.PSEL #= 1
+    apb.PENABLE #= false
+    apb.PWRITE #= write
+    apb.PADDR #= address
+    apb.PWDATA #= data
     clockDomain.waitSampling()
-  }
 
-  def read(address: Long): Long = {
-    axil.ar.valid #= true
-    axil.ar.payload.addr #= address
-    axil.r.ready #= true
-
+    apb.PENABLE #= true
     do {
       clockDomain.waitSampling()
-    } while (!axil.ar.ready.toBoolean)
-    axil.ar.valid #= false
+    } while (!apb.PREADY.toBoolean)
+    val rdata = apb.PRDATA.toLong
 
-    while (!axil.r.valid.toBoolean) {
-      clockDomain.waitSampling()
-    }
-    val rdata = axil.r.payload.data.toLong
-    axil.r.ready #= false
+    apb.PSEL #= 0
+    apb.PENABLE #= false
     clockDomain.waitSampling()
     rdata
   }
+
+  def write(address: Long, data: Long): Unit = transfer(address, write = true, data)
+
+  def read(address: Long): Long = transfer(address, write = false, 0)
 }
 
 // =============================================================================
@@ -266,8 +243,8 @@ object AxiTileDmaSim extends App {
     val ramClock = dut.ramClock
 
     // Instantiate simulation helpers
-    val axilDriver = new SimAxiLiteDriver(dut.io.s_axil_ctrl, axiClock)
-    axilDriver.reset()
+    val apbDriver = new SimApbDriver(dut.io.s_apb, axiClock)
+    apbDriver.reset()
 
     val dramSim = new AxiWriteOnlyMemorySim(dut.io.m_axi, axiClock)
     dramSim.start()
@@ -312,12 +289,12 @@ object AxiTileDmaSim extends App {
     println(s"======================================================================")
 
     // Program DMA Control Registers via AXI-Lite
-    axilDriver.write(0x08, dramBaseAddr & 0xffffffffL) // BASE_ADDR_LOW
-    axilDriver.write(0x0c, (dramBaseAddr >> 32) & 0xffffffffL) // BASE_ADDR_HIGH
-    axilDriver.write(0x10, frameRowStrideBytes) // STRIDE = 2048
-    axilDriver.write(0x14, gridTilesX) // TILES_X = 4
-    axilDriver.write(0x18, gridTilesY) // TILES_Y = 3
-    axilDriver.write(0x48, 0x00) // INTR_INT_MASK = 0 (unmask done, error, frame_done)
+    apbDriver.write(0x08, dramBaseAddr & 0xffffffffL) // BASE_ADDR_LOW
+    apbDriver.write(0x0c, (dramBaseAddr >> 32) & 0xffffffffL) // BASE_ADDR_HIGH
+    apbDriver.write(0x10, frameRowStrideBytes) // STRIDE = 2048
+    apbDriver.write(0x14, gridTilesX) // TILES_X = 4
+    apbDriver.write(0x18, gridTilesY) // TILES_Y = 3
+    apbDriver.write(0x48, 0x00) // INTR_INT_MASK = 0 (unmask done, error, frame_done)
 
     println("[AXI-Lite] Initialized BaseAddr, Stride, TilesX, TilesY, and Interrupt Mask registers.")
 
@@ -350,18 +327,18 @@ object AxiTileDmaSim extends App {
         }
 
         // 2. Trigger DMA Start via AXI-Lite
-        axilDriver.write(0x00, 0x01) // START (bit 0)
+        apbDriver.write(0x00, 0x01) // START (bit 0)
 
         // 3. Poll Interrupt RAW register (0x40) until DONE (bit 0) is asserted
         var status = 0L
         var pollCycles = 0
         do {
           axiClock.waitSampling(10)
-          status = axilDriver.read(0x40) // INTR_INT_RAW (bit 0 = done, bit 1 = error, bit 2 = frame_done)
+          status = apbDriver.read(0x40) // INTR_INT_RAW (bit 0 = done, bit 1 = error, bit 2 = frame_done)
           pollCycles += 10
           if (pollCycles % 2000 == 0) {
-            val perf = axilDriver.read(0x24)
-            val pos = axilDriver.read(0x1c)
+            val perf = apbDriver.read(0x24)
+            val pos = apbDriver.read(0x1c)
             println(
               s"    [Poll $pollCycles] RawIntr=0x${status.toHexString}, PerfCycles=$perf, Pos=0x${pos.toHexString}"
             )
@@ -369,22 +346,22 @@ object AxiTileDmaSim extends App {
         } while ((status & 0x01) == 0 && pollCycles < 50000)
 
         assert((status & 0x01) != 0, s"Timeout waiting for Tile ($tileX, $tileY) to finish!")
-        val perfCycles = axilDriver.read(0x24)
-        val curPos = axilDriver.read(0x1c)
+        val perfCycles = apbDriver.read(0x24)
+        val curPos = apbDriver.read(0x1c)
         val nextX = curPos & 0xffff
         val nextY = (curPos >> 16) & 0xffff
 
         println(f"    Completed in $perfCycles cycles. RawIntr=0x$status%X. Next Tile Pos=($nextX, $nextY)")
 
         // Clear DONE raw interrupt flag (W1C at 0x40)
-        axilDriver.write(0x40, 0x01)
+        apbDriver.write(0x40, 0x01)
 
         // Check FRAME_DONE on the very last tile (3, 2)
         if (tileX == gridTilesX - 1 && tileY == gridTilesY - 1) {
           assert((status & 0x04) != 0, "FRAME_DONE bit (0x04 in INTR_INT_RAW) must be asserted on final tile completion!")
           assert(nextX == 0 && nextY == 0, "Tile coordinates must wrap back to (0,0) after frame completion!")
           println("    >> FRAME_DONE successfully asserted and coordinates wrapped to (0,0)!")
-          axilDriver.write(0x40, 0x04) // Clear FRAME_DONE raw interrupt flag
+          apbDriver.write(0x40, 0x04) // Clear FRAME_DONE raw interrupt flag
         }
       }
     }

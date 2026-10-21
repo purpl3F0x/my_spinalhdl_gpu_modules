@@ -4,7 +4,7 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba3.apb._
 import scala.collection.mutable
 
 // =============================================================================
@@ -179,8 +179,8 @@ object AxiVisibilityDma4xSim {
       )
       dmResponder.start()
 
-      val axilDriver = new SimAxiLiteDriver(dut.io.s_axil_ctrl, dut.clockDomain)
-      axilDriver.reset()
+      val apbDriver = new SimApbDriver(dut.io.s_apb, dut.clockDomain)
+      apbDriver.reset()
 
       dut.clockDomain.waitSampling(5)
 
@@ -190,15 +190,15 @@ object AxiVisibilityDma4xSim {
       val vbBaseAddr = 0x10000000L
       val triBaseAddr = 0x80000000L
 
-      axilDriver.write(0x08, vbBaseAddr)
-      axilDriver.write(0x10, triBaseAddr)
-      val rbVbLow = axilDriver.read(0x08)
-      val rbTriLow = axilDriver.read(0x10)
+      apbDriver.write(0x08, vbBaseAddr)
+      apbDriver.write(0x10, triBaseAddr)
+      val rbVbLow = apbDriver.read(0x08)
+      val rbTriLow = apbDriver.read(0x10)
       println(f"Readback VB_BASE: 0x$rbVbLow%08X, TRI_BASE: 0x$rbTriLow%08X")
 
       val N = 16
-      axilDriver.write(0x18, N)
-      axilDriver.write(0x1c, 0) // Tile 0
+      apbDriver.write(0x18, N)
+      apbDriver.write(0x1c, 0) // Tile 0
 
       // Pattern:
       // Tris 0..2:   1, 1, 1 (Run 1: 3 tris)
@@ -229,13 +229,13 @@ object AxiVisibilityDma4xSim {
       println("=================================================================")
       println("Test 2: 4-Triangles-per-Clock Streaming on 16 Triangles (Tile 0)")
       println("=================================================================")
-      axilDriver.write(0x00, 0x0d) // START=1, IRQ_EN=1, AUTO_ADV=1
+      apbDriver.write(0x00, 0x0d) // START=1, IRQ_EN=1, AUTO_ADV=1
 
       var timeout = 500
       var done = false
       while (!done && timeout > 0) {
         dut.clockDomain.waitSampling(5)
-        val status = axilDriver.read(0x04)
+        val status = apbDriver.read(0x04)
         done = (status & 0x02) != 0
         timeout -= 1
       }
@@ -243,9 +243,9 @@ object AxiVisibilityDma4xSim {
       assert(done, "Timeout waiting for DMA tile transfer completion!")
       println("Tile 0 transfer completed!")
 
-      val visCount = axilDriver.read(0x24)
-      val cmdCount = axilDriver.read(0x28)
-      val stsCount = axilDriver.read(0x2c)
+      val visCount = apbDriver.read(0x24)
+      val cmdCount = apbDriver.read(0x28)
+      val stsCount = apbDriver.read(0x2c)
       println(f"STAT_VIS: $visCount, STAT_CMD: $cmdCount, STAT_STS: $stsCount")
       for ((cmd, idx) <- dmResponder.receivedCommands.zipWithIndex) {
         println(f"  Cmd $idx: Addr = 0x${cmd.saddr}%08X, BTT = ${cmd.btt} bytes (${cmd.btt / 128} triangles)")
@@ -272,13 +272,13 @@ object AxiVisibilityDma4xSim {
       println("Test 3: Alternating 1010 Pattern (Stress Test Dual-Push Queue)")
       println("=================================================================")
       // Clear status
-      axilDriver.write(0x04, 0x0a)
+      apbDriver.write(0x04, 0x0a)
       dut.clockDomain.waitSampling(2)
       dmResponder.receivedCommands.clear()
 
       // Reset tile index back to 0 for stress test
-      axilDriver.write(0x1c, 0) // TILE_INDEX = 0
-      axilDriver.write(0x18, 8) // 8 triangles
+      apbDriver.write(0x1c, 0) // TILE_INDEX = 0
+      apbDriver.write(0x18, 8) // 8 triangles
 
       // Pattern: 1, 0, 1, 0,  0, 1, 0, 1
       val altMask = Array(true, false, true, false, false, true, false, true)
@@ -287,21 +287,21 @@ object AxiVisibilityDma4xSim {
         vbMemory.setWord32(vbBaseAddr + (i * 4), wordVal)
       }
 
-      axilDriver.write(0x00, 0x05) // START=1, IRQ_EN=1 (no auto-adv)
+      apbDriver.write(0x00, 0x05) // START=1, IRQ_EN=1 (no auto-adv)
 
       timeout = 500
       done = false
       while (!done && timeout > 0) {
         dut.clockDomain.waitSampling(5)
-        val status = axilDriver.read(0x04)
+        val status = apbDriver.read(0x04)
         done = (status & 0x02) != 0
         timeout -= 1
       }
       assert(done, "Timeout waiting for Alternating 1010 test!")
       println("Alternating 1010 test completed successfully!")
 
-      val altVis = axilDriver.read(0x24)
-      val altCmd = axilDriver.read(0x28)
+      val altVis = apbDriver.read(0x24)
+      val altCmd = apbDriver.read(0x28)
       println(f"Alt STAT_VIS: $altVis (Expected 4), STAT_CMD: $altCmd (Expected 4)")
       assert(altVis == 4, f"Expected 4 visible, got $altVis")
       assert(altCmd == 4, f"Expected 4 single-triangle commands, got $altCmd")
@@ -309,13 +309,13 @@ object AxiVisibilityDma4xSim {
       println("=================================================================")
       println("Test 4: Odd Triangle Count (N = 13)")
       println("=================================================================")
-      axilDriver.write(0x04, 0x0a)
+      apbDriver.write(0x04, 0x0a)
       dut.clockDomain.waitSampling(2)
       dmResponder.receivedCommands.clear()
 
-      axilDriver.write(0x1c, 0) // TILE_INDEX = 0
+      apbDriver.write(0x1c, 0) // TILE_INDEX = 0
       val oddN = 13
-      axilDriver.write(0x18, oddN)
+      apbDriver.write(0x18, oddN)
       // All 13 visible
       for (i <- 0 until oddN) {
         vbMemory.setWord32(vbBaseAddr + (i * 4), 1L)
@@ -325,19 +325,19 @@ object AxiVisibilityDma4xSim {
       vbMemory.setWord32(vbBaseAddr + (14 * 4), 0xFFFFFFFFL)
       vbMemory.setWord32(vbBaseAddr + (15 * 4), 0xFFFFFFFFL)
 
-      axilDriver.write(0x00, 0x05)
+      apbDriver.write(0x00, 0x05)
 
       timeout = 500
       done = false
       while (!done && timeout > 0) {
         dut.clockDomain.waitSampling(5)
-        val status = axilDriver.read(0x04)
+        val status = apbDriver.read(0x04)
         done = (status & 0x02) != 0
         timeout -= 1
       }
       assert(done, "Timeout waiting for Odd test!")
-      val oddVis = axilDriver.read(0x24)
-      val oddCmd = axilDriver.read(0x28)
+      val oddVis = apbDriver.read(0x24)
+      val oddCmd = apbDriver.read(0x28)
       println(f"Odd N=13 STAT_VIS: $oddVis (Expected 13), STAT_CMD: $oddCmd (Expected 1)")
       assert(oddVis == 13, f"Expected 13 visible triangles, got $oddVis (padding was not masked!)")
       assert(oddCmd == 1, f"Expected 1 merged command of 13 triangles, got $oddCmd")

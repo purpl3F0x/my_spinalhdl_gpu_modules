@@ -3,7 +3,7 @@ package projectname
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.amba4.axi._
-import spinal.lib.bus.amba4.axilite._
+import spinal.lib.bus.amba3.apb._
 import spinal.lib.bus.regif._
 import spinal.lib.bus.regif.AccessType._
 import spinal.lib.fsm._
@@ -80,8 +80,8 @@ case class AxiTileDmaConfig(
     useId = idWidth > 0
   )
 
-  def getAxiLiteConfig: AxiLite4Config = AxiLite4Config(
-    addressWidth = 8,
+  def getApbConfig: Apb3Config = Apb3Config(
+    addressWidth = 7,
     dataWidth = 32
   )
 }
@@ -98,8 +98,8 @@ class AxiTileDma(
   val ramClock = if (ramClockDomain != null) ramClockDomain else ClockDomain.external("ram", withReset = true)
 
   val io = new Bundle {
-    // 1. AXI-Lite Slave Interface for Register Programming (AXI clock domain)
-    val s_axil_ctrl = slave(AxiLite4(config.getAxiLiteConfig))
+    // 1. APB3 Slave Interface for Register Programming (AXI clock domain)
+    val s_apb = slave(Apb3(config.getApbConfig))
 
     // 2. AXI4 Full Write Master Interface to DRAM (AXI clock domain)
     val m_axi = master(Axi4WriteOnly(config.getAxi4Config))
@@ -132,7 +132,6 @@ class AxiTileDma(
     }
   }
 
-  renameAxiForVivado(io.s_axil_ctrl, "s_axil_ctrl")
   renameAxiForVivado(io.m_axi, "m_axi")
 
   // Forward RAM clock and active-high reset to BRAM interface
@@ -158,7 +157,7 @@ class AxiTileDma(
   clockDomain.clock.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 aclk CLK")
   clockDomain.clock.addAttribute(
     "X_INTERFACE_PARAMETER",
-    "ASSOCIATED_BUSIF s_axil_ctrl:m_axi, ASSOCIATED_RESET aresetn"
+    "ASSOCIATED_BUSIF m_axi, ASSOCIATED_RESET aresetn"
   )
   clockDomain.reset.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 aresetn RST")
   clockDomain.reset.addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
@@ -191,7 +190,7 @@ class AxiTileDma(
   // ---------------------------------------------------------------------------
   // Register Map via SpinalHDL Built-in regif
   // ---------------------------------------------------------------------------
-  val busif = AxiLite4BusInterface(io.s_axil_ctrl, (0x0000, 256), "AXI_TILE_DMA")
+  val busif = Apb3BusInterface(io.s_apb, (0x0000, 128), "AXI_TILE_DMA")
 
   // Status and Debug registers driven by hardware
   val dmaBusy = RegInit(False)
@@ -698,7 +697,7 @@ class AxiTileDmaWithRam(
   val ramClock = if (ramClockDomain != null) ramClockDomain else ClockDomain.external("ram", withReset = true)
 
   val io = new Bundle {
-    val s_axil_ctrl = slave(AxiLite4(config.getAxiLiteConfig))
+    val s_apb = slave(Apb3(config.getApbConfig))
     val m_axi = master(Axi4WriteOnly(config.getAxi4Config))
     val irq = out Bool ()
     val irq_done = out Bool ()
@@ -727,14 +726,13 @@ class AxiTileDmaWithRam(
     }
   }
 
-  renameAxiForVivado(io.s_axil_ctrl, "s_axil_ctrl")
   renameAxiForVivado(io.m_axi, "m_axi")
 
   clockDomain.clock.setName("aclk")
   clockDomain.reset.setName("aresetn")
 
   val dma = new AxiTileDma(config, ramClockDomain = ramClock)
-  dma.io.s_axil_ctrl <> io.s_axil_ctrl
+  dma.io.s_apb <> io.s_apb
   dma.io.m_axi <> io.m_axi
   io.irq := dma.io.irq
   io.irq_done := dma.io.irq_done
