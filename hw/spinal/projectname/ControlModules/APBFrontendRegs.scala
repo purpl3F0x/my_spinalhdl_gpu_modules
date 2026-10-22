@@ -18,6 +18,7 @@ class APBFrontendRegs(tile_x_width: Int = 5, tile_y_width: Int = 5) extends Comp
     val s_apb = slave(Apb3(Apb3Config(addressWidth = 5, dataWidth = 32)))
     val thread_empty = in Bool ()
     val orchestrator_empty = in Bool ()
+    val input_fifo_idle = in Bool ()
     val thread_sw_reset = out Bool ()
     val tile_x_index = out UInt (tile_x_width bits)
     val tile_y_index = out UInt (tile_y_width bits)
@@ -43,9 +44,11 @@ class APBFrontendRegs(tile_x_width: Int = 5, tile_y_width: Int = 5) extends Comp
     val REG_STATUS = busif.newRegAt(address = 0x00, doc = "Front-End Status and Control")
     val EMPTY = REG_STATUS.field(Bool(), RO, doc = "Thread input buffer empty status")
     val ORCHESTRATOR_EMPTY = REG_STATUS.field(Bool(), RO, doc = "Orchestrator input buffer empty status")
+    val INPUT_FIFO_IDLE = REG_STATUS.field(Bool(), RO, doc = "Input FIFO idle status")
     val RESET = REG_STATUS.fieldAt(pos=31, Bool(), W1P, doc = "Write 1 to issue a thread reset pulse")
     EMPTY := BufferCC(io.thread_empty, init = False)
     ORCHESTRATOR_EMPTY := BufferCC(io.orchestrator_empty, init = False)
+    INPUT_FIFO_IDLE := BufferCC(io.input_fifo_idle, init = False)
 
     // 0x04: Tile X index
     val REG_TILE_X = busif.newRegAt(address = 0x04, doc = "Tile X Index")
