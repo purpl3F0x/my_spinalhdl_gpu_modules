@@ -29,7 +29,7 @@ case class TileRamReadPort(addrWidth: Int, dataWidth: Int) extends Bundle with I
 // =============================================================================
 case class AxiTileDmaConfig(
     addressWidth: Int = 32,
-    pixelsPerClock: Int = 4, // Number of 32-bit pixels per clock cycle (1, 2, 4, 8, 16)
+    pixelsPerClock: Int = 4, // Number of 32-bit pixels per AXI beat (2, 4, 8, 16); each quad thread port supplies half
     tileWidth: Int = 128, // Tile width in pixels (compile-time constant, e.g. 128)
     tileHeight: Int = 128, // Tile height in rows (compile-time constant, e.g. 128)
     maxBurstLength: Int = 256, // Max AXI burst beats (AXI4 max = 256)
@@ -39,15 +39,20 @@ case class AxiTileDmaConfig(
     useAutoAdvance: Boolean = true, // Compile-time option: enable 2D raster tile coordinate advancing
     bramReadLatency: Int = 1 // Read latency in clock cycles (1 for primitive output reg, 2 for optional pipeline reg)
 ) {
-  require(pixelsPerClock >= 1 && isPow2(pixelsPerClock), "pixelsPerClock must be a power of 2 (1, 2, 4, 8, 16...)")
+  require(pixelsPerClock >= 2 && isPow2(pixelsPerClock), "pixelsPerClock must be a power of 2 >= 2 (2, 4, 8, 16...)")
   require(tileWidth > 0 && tileHeight > 0, "tile dimensions must be positive")
   require(tileWidth % pixelsPerClock == 0, "tileWidth must be an integer multiple of pixelsPerClock")
+  require(tileHeight % 2 == 0, "tileHeight must be even (2x2 quad rows)")
   require(maxBurstLength >= 1 && maxBurstLength <= 256, "maxBurstLength must be between 1 and 256 beats")
+  require(maxOutstanding >= 1, "maxOutstanding must be at least 1")
   require(cdcDepth >= 8 && isPow2(cdcDepth), "cdcDepth must be a power of 2 >= 8")
   require(bramReadLatency >= 1, "bramReadLatency must be at least 1 clock cycle")
+
+  // BRAM read latency + 1 register stage for the quad interleave mux
+  val readPipeLatency: Int = bramReadLatency + 1
   require(
-    cdcDepth >= (bramReadLatency + 4),
-    s"cdcDepth ($cdcDepth) must be >= bramReadLatency + 4 (${bramReadLatency + 4})"
+    cdcDepth >= (readPipeLatency + 4),
+    s"cdcDepth ($cdcDepth) must be >= bramReadLatency + 5 (${readPipeLatency + 4})"
   )
 
   val pixelBits: Int = 32
@@ -63,9 +68,30 @@ case class AxiTileDmaConfig(
   val totalBeats: Int = beatsPerRow * tileHeight
   val bytesPerRow: Int = tileWidth * pixelBytes
   val totalBytes: Int = tileWidth * tileHeight * pixelBytes
-  val ramWordAddrWidth: Int = log2Up(totalBeats) max 1
-  val ramByteAddrWidth: Int = log2Up(totalBytes) max 1
-  val ramAddrWidth: Int = ramByteAddrWidth // Byte-addressable BRAM address width
+
+  // 4KB-aligned base + STRIDE multiple of bytesPerRow => every tile line starts on a bytesPerRow
+  // boundary and fits in one 4KB page, so all AXI bursts have the same length and never cross 4KB
+  require(isPow2(bytesPerRow) && bytesPerRow <= 4096, "tile row bytes must be a power of 2 <= 4KB")
+  val strideAlignShift: Int = log2Up(bytesPerRow) // STRIDE must be a multiple of bytesPerRow (512 B)
+  val burstBeats: Int = beatsPerRow min maxBurstLength
+  require(beatsPerRow % burstBeats == 0, "beatsPerRow must be a multiple of maxBurstLength when longer")
+  val burstsPerRow: Int = beatsPerRow / burstBeats
+  val burstBytes: Int = burstBeats * bytesPerBeat
+
+  // GPU 2x2 quad thread RAMs:
+  //   thread 0 = (even x, even y), thread 1 = (odd x, even y)
+  //   thread 2 = (even x, odd y),  thread 3 = (odd x, odd y)
+  // Each thread RAM word holds that thread's pixel from threadPixels horizontally consecutive quads,
+  // one word row per quad row (tileHeight / 2 rows of beatsPerRow words).
+  val quadThreads: Int = 4
+  val threadPixels: Int = pixelsPerClock / 2
+  val threadDataWidth: Int = threadPixels * pixelBits // 64 bits @ 4 px/clock
+  val threadBytesPerBeat: Int = threadPixels * pixelBytes
+  val threadBeatShift: Int = log2Up(threadBytesPerBeat)
+  val threadTotalBeats: Int = beatsPerRow * (tileHeight / 2)
+  val threadTotalBytes: Int = threadTotalBeats * threadBytesPerBeat
+  val threadWordAddrWidth: Int = log2Up(threadTotalBeats) max 1
+  val threadByteAddrWidth: Int = log2Up(threadTotalBytes) max 1 // Byte-addressable BRAM address width
 
   def getAxi4Config: Axi4Config = Axi4Config(
     addressWidth = addressWidth,
@@ -104,8 +130,9 @@ class AxiTileDma(
     // 2. AXI4 Full Write Master Interface to DRAM (AXI clock domain)
     val m_axi = master(Axi4WriteOnly(config.getAxi4Config))
 
-    // 3. Tiled RAM (BRAM) Read Port (Operates in high-frequency ramClock domain)
-    val tile_ram = master(TileRamReadPort(config.ramByteAddrWidth, config.dataWidth))
+    // 3. Per-thread 2x2 quad Tiled RAM (BRAM) Read Ports (Operate in high-frequency ramClock domain)
+    val tile_ram =
+      Vec.fill(config.quadThreads)(master(TileRamReadPort(config.threadByteAddrWidth, config.threadDataWidth)))
 
     // 4. Interrupt Outputs (AXI clock domain)
     val irq = out Bool ()
@@ -134,44 +161,37 @@ class AxiTileDma(
 
   renameAxiForVivado(io.m_axi, "m_axi")
 
-  // Forward RAM clock and active-high reset to BRAM interface
-  // Input ram_resetn is active-low, but BRAM output tile_ram_rst is ALWAYS active-high
-  io.tile_ram.clk := ramClock.readClockWire
-  io.tile_ram.rst := !ramClock.readResetWire
-
-  // Vivado BRAM Interface synthesis attributes for IP Integrator block designs
-  io.tile_ram.clk.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:bram:1.0 tile_ram CLK")
-  io.tile_ram.clk.addAttribute(
-    "X_INTERFACE_PARAMETER",
-    s"MASTER_TYPE BRAM_CTRL, MEM_ECC NONE, MEM_WIDTH ${config.dataWidth}, MEM_SIZE ${config.totalBytes}, READ_WRITE_MODE READ_ONLY, READ_LATENCY ${config.bramReadLatency}"
-  )
-  io.tile_ram.rst.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:bram:1.0 tile_ram RST")
-  io.tile_ram.rst.addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_HIGH")
-  io.tile_ram.en.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:bram:1.0 tile_ram EN")
-  io.tile_ram.addr.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:bram:1.0 tile_ram ADDR")
-  io.tile_ram.dout.addAttribute("X_INTERFACE_INFO", "xilinx.com:interface:bram:1.0 tile_ram DOUT")
+  // Forward RAM clock and active-high reset to each thread RAM port
+  // Input ram_resetn is active-low, but tile_ram_N_rst is ALWAYS active-high
+  for (port <- io.tile_ram) {
+    port.clk := ramClock.readClockWire
+    port.rst := !ramClock.readResetWire
+  }
 
   // AXI Clock and Reset names & Vivado interface association attributes
+  // Attributes go on the pulled-in wires (readClockWire/readResetWire), which are this component's ports
   clockDomain.clock.setName("aclk")
   clockDomain.reset.setName("aresetn")
-  clockDomain.clock.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 aclk CLK")
-  clockDomain.clock.addAttribute(
-    "X_INTERFACE_PARAMETER",
-    "ASSOCIATED_BUSIF m_axi, ASSOCIATED_RESET aresetn"
-  )
-  clockDomain.reset.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 aresetn RST")
-  clockDomain.reset.addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
+  clockDomain.readClockWire
+    .setName("aclk")
+    .addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 aclk CLK")
+    .addAttribute("X_INTERFACE_PARAMETER", "ASSOCIATED_BUSIF m_axi, ASSOCIATED_RESET aresetn")
+  clockDomain.readResetWire
+    .setName("aresetn")
+    .addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 aresetn RST")
+    .addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
 
-  // RAM Clock and Reset names & Vivado interface association attributes (input reset is active-low ram_resetn)
+  // RAM Clock and Reset names & Vivado attributes (input reset is active-low ram_resetn)
   ramClock.clock.setName("ram_clk")
   ramClock.reset.setName("ram_resetn")
-  ramClock.clock.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 ram_clk CLK")
-  ramClock.clock.addAttribute(
-    "X_INTERFACE_PARAMETER",
-    "ASSOCIATED_BUSIF tile_ram, ASSOCIATED_RESET ram_resetn"
-  )
-  ramClock.reset.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 ram_resetn RST")
-  ramClock.reset.addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
+  ramClock.readClockWire
+    .setName("ram_clk")
+    .addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:clock:1.0 ram_clk CLK")
+    .addAttribute("X_INTERFACE_PARAMETER", "ASSOCIATED_RESET ram_resetn")
+  ramClock.readResetWire
+    .setName("ram_resetn")
+    .addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:reset:1.0 ram_resetn RST")
+    .addAttribute("X_INTERFACE_PARAMETER", "POLARITY ACTIVE_LOW")
 
   // Vivado Interrupt interface attributes
   io.irq.addAttribute("X_INTERFACE_INFO", "xilinx.com:signal:interrupt:1.0 irq INTERRUPT")
@@ -194,6 +214,7 @@ class AxiTileDma(
 
   // Status and Debug registers driven by hardware
   val dmaBusy = RegInit(False)
+  val softResetPending = RegInit(False)
   val brespVal = Reg(Bits(2 bits)) init (0)
   val curLineIdx = Reg(UInt(log2Up(config.tileHeight + 1) bits)) init (0)
   val cycleCounter = Reg(UInt(32 bits)) init (0)
@@ -204,15 +225,22 @@ class AxiTileDma(
   val RESET_POS =
     if (config.useAutoAdvance) REG_CTRL.field(Bool(), W1P, doc = "Reset tile coordinates (TileX=0, TileY=0)") else null
   if (!config.useAutoAdvance) REG_CTRL.reserved(1 bits)
-  val SOFT_RESET = REG_CTRL.field(Bool(), W1P, doc = "Software reset for DMA FSM and internal pointers")
+  val SOFT_RESET = REG_CTRL.field(
+    Bool(),
+    W1P,
+    doc = "Software reset for DMA FSM and tile position (deferred until the active transfer completes)"
+  )
 
   // 0x04: STATUS (Operational status flags; interrupt events managed by INTR factory at 0x40)
   val REG_STATUS = busif.newRegAt(address = 0x04, doc = "DMA Status Register")
   val BUSY = REG_STATUS.field(Bool(), RO, doc = "DMA active transfer busy flag")
   val LAST_BRESP = REG_STATUS.field(Bits(2 bits), RO, doc = "Last AXI write response status")
+  val SOFT_RESET_PENDING =
+    REG_STATUS.field(Bool(), RO, doc = "Soft reset requested, waiting for the active transfer to complete")
 
   BUSY := dmaBusy
   LAST_BRESP := brespVal
+  SOFT_RESET_PENDING := softResetPending
 
   // 0x08: BASE_ADDR_LOW (RW)
   val REG_BASE_LOW = busif.newRegAt(address = 0x08, doc = "DRAM Frame Base Address (Lower 32 bits)")
@@ -220,7 +248,7 @@ class AxiTileDma(
     UInt(32 bits),
     RW,
     resetValue = 0,
-    doc = "Lower 32 bits of Frame Destination Base Address (4KB aligned: bits 11..0 = 0)"
+    doc = "Lower 32 bits of Frame Destination Base Address (4KB aligned: bits 11..0 ignored)"
   )
 
   // 0x0C: BASE_ADDR_HIGH (RW)
@@ -235,7 +263,12 @@ class AxiTileDma(
   // 0x10: STRIDE (RW)
   val REG_STRIDE = busif.newRegAt(address = 0x10, doc = "DRAM Frame Row Byte Stride")
   val STRIDE =
-    REG_STRIDE.field(UInt(32 bits), RW, resetValue = 0, doc = "Framebuffer row byte stride / pitch (power of 2)")
+    REG_STRIDE.field(
+      UInt(32 bits),
+      RW,
+      resetValue = 0,
+      doc = s"Framebuffer row byte stride / pitch (multiple of ${config.bytesPerRow} bytes, low bits ignored)"
+    )
 
   // 0x14: TILES_X
   val REG_TILES_X = if (config.useAutoAdvance) busif.newRegAt(address = 0x14, doc = "Horizontal Tiles Count") else null
@@ -266,7 +299,11 @@ class AxiTileDma(
   // 0x20: CURRENT_LINE (RO)
   val REG_LINE = busif.newRegAt(address = 0x20, doc = "Current Line Progress")
   val CURRENT_LINE =
-    REG_LINE.field(UInt(log2Up(config.tileHeight + 1) bits), RO, doc = "Current line index within active tile (0..127)")
+    REG_LINE.field(
+      UInt(log2Up(config.tileHeight + 1) bits),
+      RO,
+      doc = s"Line index being issued on AXI AW within active tile (0..${config.tileHeight - 1})"
+    )
   CURRENT_LINE := curLineIdx
 
   // 0x24: PERF_CYCLES (RO)
@@ -364,12 +401,19 @@ class AxiTileDma(
   // ===========================================================================
   // HIGH-FREQUENCY RAM CLOCK DOMAIN LOGIC (ramClock, optimized for 600+ MHz)
   // Fully pipelined credit tracking: registers pushOccupancy to cut the Gray-to-Binary
-  // XOR path, and drives tile_ram.en and tile_ram.addr directly from registers.
+  // XOR path, and drives tile_ram_N.en and tile_ram_N.addr directly from registers.
+  //
+  // 2x2 quad readout: all four thread RAMs share one word address. Even tile lines take
+  // threads 0/1, then the same quad row is re-read for the odd line from threads 2/3.
+  // Each 128-bit beat interleaves the pair as (L.p0, R.p0, L.p1, R.p1, ...).
   // ===========================================================================
   val ramArea = new ClockingArea(ramClock) {
     val ramReadsLeft = Reg(UInt(log2Up(config.totalBeats + 1) bits)) init (0)
     val ramPushesLeft = Reg(UInt(log2Up(config.totalBeats + 1) bits)) init (0)
-    val ramAddrReg = Reg(UInt(config.ramWordAddrWidth bits)) init (0)
+    val ramAddrReg = Reg(UInt(config.threadWordAddrWidth bits)) init (0)
+    val ramRowBase = Reg(UInt(config.threadWordAddrWidth bits)) init (0) // First word of current quad row
+    val ramBeatX = Reg(UInt(log2Up(config.beatsPerRow) max 1 bits)) init (0)
+    val ramOddLine = RegInit(False) // False: threads 0/1 (even line), True: threads 2/3 (odd line)
     val ramEnReg = RegInit(False)
     val active = RegInit(False)
 
@@ -379,26 +423,51 @@ class AxiTileDma(
     // In-flight tracking: counts reads in pipeline between schedule and retirement into pushOccupancyReg
     // Sized to cdcDepth + 1 to prevent counter overflow during bursts
     val inFlight = Reg(UInt(log2Up(config.cdcDepth + 1) bits)) init (0)
-    val inFlightRetire = Delay(ramEnReg, cycleCount = config.bramReadLatency + 2, init = False)
+    val inFlightRetire = Delay(ramEnReg, cycleCount = config.readPipeLatency + 2, init = False)
 
     // Pipeline Stage 2: Fast 5-bit comparison with registered occupancy
-    val headroom = config.bramReadLatency + 3
+    val headroom = config.readPipeLatency + 3
     val totalCommitted = pushOccupancyReg + inFlight
     val hasRoom = totalCommitted < (config.cdcDepth - headroom)
     val nextCanRead = active && (ramReadsLeft > 0) && hasRoom
 
     // Direct Register Outputs to BRAM pins (Zero combinational gates, optimal for 600 MHz)
     // BRAM is continuously enabled throughout active transfer; disabled when idle
-    io.tile_ram.en := active
-    io.tile_ram.addr := (ramAddrReg @@ U(0, config.beatShift bits)).resized
+    for (port <- io.tile_ram) {
+      port.en := active
+      port.addr := (ramAddrReg @@ U(0, config.threadBeatShift bits)).resized
+    }
 
-    // Delay read enable by bramReadLatency cycles to align with BRAM dout valid timing
+    // Delay read enable and line parity by bramReadLatency cycles to align with BRAM dout valid timing
     val readValid = Delay(ramEnReg, cycleCount = config.bramReadLatency, init = False)
+    val readOddLine = Delay(ramOddLine, cycleCount = config.bramReadLatency, init = False)
+
+    // Select the thread pair for this line and interleave their pixels into one AXI beat
+    val leftWord = readOddLine ? io.tile_ram(2).dout | io.tile_ram(0).dout
+    val rightWord = readOddLine ? io.tile_ram(3).dout | io.tile_ram(1).dout
+    val mergedWord = Bits(config.dataWidth bits)
+    for (i <- 0 until config.threadPixels) {
+      mergedWord((2 * i) * config.pixelBits, config.pixelBits bits) := leftWord(
+        i * config.pixelBits,
+        config.pixelBits bits
+      )
+      mergedWord((2 * i + 1) * config.pixelBits, config.pixelBits bits) := rightWord(
+        i * config.pixelBits,
+        config.pixelBits bits
+      )
+    }
+
+    // Register the interleave mux output before the CDC FIFO write port
+    val mergedValid = RegNext(readValid) init (False)
+    val mergedData = RegNext(mergedWord)
 
     when(startPulseRam) {
       ramReadsLeft := config.totalBeats
       ramPushesLeft := config.totalBeats
       ramAddrReg := 0
+      ramRowBase := 0
+      ramBeatX := 0
+      ramOddLine := False
       ramEnReg := False
       inFlight := 0
       active := True
@@ -406,9 +475,23 @@ class AxiTileDma(
       // Register read enable for cycle T+1
       ramEnReg := nextCanRead
 
-      // Address increments whenever a read is active
+      // Address advances whenever a read is active
       when(ramEnReg) {
-        ramAddrReg := ramAddrReg + 1
+        when(ramBeatX === config.beatsPerRow - 1) {
+          ramBeatX := 0
+          ramOddLine := !ramOddLine
+          when(ramOddLine) {
+            // Odd line done: quad row complete, step to the next quad row
+            ramAddrReg := ramAddrReg + 1
+            ramRowBase := ramAddrReg + 1
+          }.otherwise {
+            // Even line done: rewind to re-read this quad row from threads 2/3
+            ramAddrReg := ramRowBase
+          }
+        }.otherwise {
+          ramBeatX := ramBeatX + 1
+          ramAddrReg := ramAddrReg + 1
+        }
       }
 
       // Reads remaining decrements when a read is scheduled
@@ -428,7 +511,7 @@ class AxiTileDma(
       }
 
       // Pushes remaining decrements when data enters CDC FIFO
-      when(readValid) {
+      when(mergedValid) {
         ramPushesLeft := ramPushesLeft - 1
       }
 
@@ -438,25 +521,30 @@ class AxiTileDma(
       }
     }
 
-    // Push BRAM data directly into the dual-clock CDC FIFO
-    cdcFifo.io.push.valid := readValid
-    cdcFifo.io.push.payload := io.tile_ram.dout
+    // Push interleaved quad data into the dual-clock CDC FIFO
+    cdcFifo.io.push.valid := mergedValid
+    cdcFifo.io.push.payload := mergedData
   }
 
   // ===========================================================================
   // AXI4 MASTER WRITE CHANNELS & FSM LOGIC (axiClock domain)
+  //
+  // Base is 4KB aligned and STRIDE is a multiple of bytesPerRow (512 B), so every tile line
+  // starts on a bytesPerRow boundary and lies inside one 4KB page: all bursts are the same
+  // compile-time length (burstBeats) and never need 4KB splitting.
+  //
+  // AW and W are decoupled:
+  //   - The AW planner issues bursts ahead of the data, up to maxOutstanding bursts
+  //     awaiting their B response.
+  //   - The W engine streams beats from the CDC FIFO back-to-back, gated by wCredits
+  //     (bursts whose AW was accepted but whose W beats are not yet complete).
   // ===========================================================================
   object DmaState extends SpinalEnum {
-    val IDLE, SEND_AW, READ_CDC_AND_WRITE_W, WAIT_RESP = newElement()
+    val IDLE, TRANSFER = newElement()
     val ADVANCE_CALC_1 = if (config.useAutoAdvance) newElement() else null
     val ADVANCE_CALC_2 = if (config.useAutoAdvance) newElement() else null
   }
   val state = RegInit(DmaState.IDLE)
-
-  val currentLineInTile = Reg(UInt(log2Up(config.tileHeight + 1) bits)) init (0)
-  val lineStartDramAddr = Reg(UInt(config.addressWidth bits)) init (0)
-  val curDramAddr = Reg(UInt(config.addressWidth bits)) init (0)
-  val beatsLeftInLine = Reg(UInt(log2Up(config.beatsPerRow + 1) bits)) init (0)
 
   // Pipelined registers for multi-cycle tile-advance calculation
   val advTileHeightStride = if (config.useAutoAdvance) Reg(UInt(config.addressWidth bits)) init (0) else null
@@ -464,27 +552,59 @@ class AxiTileDma(
   val advIsLastInRow = if (config.useAutoAdvance) RegInit(False) else null
   val advIsLastInFrame = if (config.useAutoAdvance) RegInit(False) else null
 
-  // Burst length calculation:
-  // With 4KB-aligned base address and power-of-2 stride (multiple of 512 bytes),
-  // tile rows (512 bytes = 32 beats @ 128-bit) never cross 4KB boundaries.
-  val currentBurstLen = UInt(16 bits)
-  if (config.beatsPerRow <= config.maxBurstLength) {
-    currentBurstLen := beatsLeftInLine.resize(16)
-  } else {
-    currentBurstLen := beatsLeftInLine.resize(16).min(U(config.maxBurstLength, 16 bits))
-  }
+  // ---------------------------------------------------------------------------
+  // AW Burst Planner
+  // ---------------------------------------------------------------------------
+  val planActive = RegInit(False) // More bursts left to issue for the active tile
+  val planLineStart = Reg(UInt(config.addressWidth bits)) init (0)
+  val planAddr = Reg(UInt(config.addressWidth bits)) init (0)
+  val planBurstIdx = Reg(UInt(log2Up(config.burstsPerRow) max 1 bits)) init (0) // Burst index within line
 
-  val activeBurstLen = Reg(UInt(16 bits)) init (0)
-  val wBeatsRemaining = Reg(UInt(16 bits)) init (0)
-
+  // Counts bursts from planner load until B response
   val outstandingBursts = Reg(UInt(log2Up(config.maxOutstanding + 1) bits)) init (0)
+
+  val planLastBurstInLine = if (config.burstsPerRow == 1) True else planBurstIdx === (config.burstsPerRow - 1)
+  val planLastLine = curLineIdx === (config.tileHeight - 1)
+
+  // AW output stage (registered AXI outputs)
+  val awValidReg = RegInit(False)
+  val awAddrReg = Reg(UInt(config.addressWidth bits)) init (0)
+
+  // Load next burst when the AW stage is free (or draining) and the outstanding budget allows
+  val planLoad = (state === DmaState.TRANSFER) && planActive &&
+    (outstandingBursts < config.maxOutstanding) && (!awValidReg || io.m_axi.aw.ready)
+
+  when(planLoad) {
+    awValidReg := True
+    awAddrReg := planAddr
+
+    when(planLastBurstInLine) {
+      planBurstIdx := 0
+      when(planLastLine) {
+        // Last burst of the tile issued
+        planActive := False
+      }.otherwise {
+        // Advance to next line within current tile (single register addition)
+        val nextLineDram = planLineStart + shadowStride.resized
+        planLineStart := nextLineDram
+        planAddr := nextLineDram
+        curLineIdx := curLineIdx + 1
+      }
+    }.otherwise {
+      // More bursts remaining in current line (line longer than maxBurstLength)
+      planBurstIdx := planBurstIdx + 1
+      planAddr := planAddr + U(config.burstBytes, config.addressWidth bits)
+    }
+  }.elsewhen(io.m_axi.aw.ready) {
+    awValidReg := False
+  }
 
   // ---------------------------------------------------------------------------
   // AXI4 AW (Write Address) Channel
   // ---------------------------------------------------------------------------
-  io.m_axi.aw.valid := (state === DmaState.SEND_AW) && (outstandingBursts < config.maxOutstanding)
-  io.m_axi.aw.addr := curDramAddr
-  io.m_axi.aw.len := (currentBurstLen - 1).resized
+  io.m_axi.aw.valid := awValidReg
+  io.m_axi.aw.addr := awAddrReg
+  io.m_axi.aw.len := U(config.burstBeats - 1, 8 bits)
   io.m_axi.aw.size := U(config.beatShift, 3 bits)
   io.m_axi.aw.burst := Axi4.burst.INCR
 
@@ -495,29 +615,44 @@ class AxiTileDma(
   if (config.getAxi4Config.useProt) io.m_axi.aw.prot.clearAll()
   if (config.getAxi4Config.useQos) io.m_axi.aw.qos.clearAll()
 
+  val awFire = io.m_axi.aw.fire
+
   // ---------------------------------------------------------------------------
   // AXI4 W (Write Data) Channel - Pop from Async CDC FIFO
   // ---------------------------------------------------------------------------
+  val wCredits = Reg(UInt(log2Up(config.maxOutstanding + 1) bits)) init (0)
+  val wBeatIdx = Reg(UInt(log2Up(config.burstBeats) max 1 bits)) init (0) // Beat index within burst
+  val wLast = if (config.burstBeats == 1) True else wBeatIdx === (config.burstBeats - 1)
   val wFire = io.m_axi.w.fire
+  val wBurstDone = wFire && wLast
 
-  io.m_axi.w.valid := (state === DmaState.READ_CDC_AND_WRITE_W) && cdcFifo.io.pop.valid
+  io.m_axi.w.valid := (wCredits =/= 0) && cdcFifo.io.pop.valid
   io.m_axi.w.data := cdcFifo.io.pop.payload
   io.m_axi.w.strb.setAll()
-  io.m_axi.w.last := (wBeatsRemaining === 1)
+  io.m_axi.w.last := wLast
 
-  cdcFifo.io.pop.ready := (state === DmaState.READ_CDC_AND_WRITE_W) && io.m_axi.w.ready
+  cdcFifo.io.pop.ready := (wCredits =/= 0) && io.m_axi.w.ready
+
+  when(wFire) {
+    wBeatIdx := wLast ? U(0, wBeatIdx.getWidth bits) | (wBeatIdx + 1)
+  }
+
+  when(awFire && !wBurstDone) {
+    wCredits := wCredits + 1
+  }.elsewhen(!awFire && wBurstDone) {
+    wCredits := wCredits - 1
+  }
 
   // ---------------------------------------------------------------------------
   // AXI4 B (Write Response) Channel
   // ---------------------------------------------------------------------------
   io.m_axi.b.ready := True
 
-  val awFire = io.m_axi.aw.fire
   val bFire = io.m_axi.b.fire
 
-  when(awFire && !bFire) {
+  when(planLoad && !bFire) {
     outstandingBursts := outstandingBursts + 1
-  }.elsewhen(!awFire && bFire) {
+  }.elsewhen(!planLoad && bFire) {
     outstandingBursts := outstandingBursts - 1
   }
 
@@ -530,150 +665,111 @@ class AxiTileDma(
 
   // ---------------------------------------------------------------------------
   // Main DMA FSM Control (AXI Clock Domain)
+  // SOFT_RESET is deferred until IDLE: issued AXI bursts cannot be aborted and the
+  // RAM reader / CDC FIFO must drain, so a request during a transfer is held pending.
   // ---------------------------------------------------------------------------
   when(SOFT_RESET) {
-    state := DmaState.IDLE
-    dmaBusy := False
-    outstandingBursts := 0
-    tileOriginAddr := 0
-    rowStartTileAddr := 0
-    if (config.useAutoAdvance) {
-      CUR_TILE_X := 0
-      CUR_TILE_Y := 0
+    softResetPending := True
+  }
+
+  switch(state) {
+    is(DmaState.IDLE) {
+      when(SOFT_RESET || softResetPending) {
+        softResetPending := False
+        tileOriginAddr := 0
+        rowStartTileAddr := 0
+        if (config.useAutoAdvance) {
+          CUR_TILE_X := 0
+          CUR_TILE_Y := 0
+        }
+      }.elsewhen(START && !dmaBusy) {
+        dmaBusy := True
+        cycleCounter := 0
+
+        shadowStride := STRIDE(31 downto config.strideAlignShift) @@ U(0, config.strideAlignShift bits)
+        if (config.useAutoAdvance) {
+          shadowTilesX := (TILES_X === 0) ? U(1, 16 bits) | TILES_X
+          shadowTilesY := (TILES_Y === 0) ? U(1, 16 bits) | TILES_Y
+
+          val currentOrigin =
+            ((CUR_TILE_X === 0 && CUR_TILE_Y === 0) || tileOriginAddr === 0) ? fullBaseAddr | tileOriginAddr
+          tileOriginAddr := currentOrigin
+          rowStartTileAddr := (CUR_TILE_X === 0) ? currentOrigin | rowStartTileAddr
+          planLineStart := currentOrigin
+          planAddr := currentOrigin
+        } else {
+          tileOriginAddr := fullBaseAddr
+          rowStartTileAddr := fullBaseAddr
+          planLineStart := fullBaseAddr
+          planAddr := fullBaseAddr
+        }
+
+        curLineIdx := 0
+        planBurstIdx := 0
+        planActive := True
+
+        // Trigger high-frequency RAM reader in ramClock domain via CDC pulse
+        startTilePulseAxi := True
+
+        state := DmaState.TRANSFER
+      }
     }
-  }.otherwise {
-    switch(state) {
-      is(DmaState.IDLE) {
-        when(START && !dmaBusy) {
-          dmaBusy := True
-          cycleCounter := 0
 
-          shadowStride := STRIDE
-          if (config.useAutoAdvance) {
-            shadowTilesX := (TILES_X === 0) ? U(1, 16 bits) | TILES_X
-            shadowTilesY := (TILES_Y === 0) ? U(1, 16 bits) | TILES_Y
-
-            val currentOrigin =
-              ((CUR_TILE_X === 0 && CUR_TILE_Y === 0) || tileOriginAddr === 0) ? fullBaseAddr | tileOriginAddr
-            tileOriginAddr := currentOrigin
-            rowStartTileAddr := (CUR_TILE_X === 0) ? currentOrigin | rowStartTileAddr
-            lineStartDramAddr := currentOrigin
-            curDramAddr := currentOrigin
-          } else {
-            tileOriginAddr := fullBaseAddr
-            rowStartTileAddr := fullBaseAddr
-            lineStartDramAddr := fullBaseAddr
-            curDramAddr := fullBaseAddr
-          }
-
-          currentLineInTile := 0
-          curLineIdx := 0
-
-          // Trigger high-frequency RAM reader in ramClock domain via CDC pulse
-          startTilePulseAxi := True
-
-          beatsLeftInLine := config.beatsPerRow
-          state := DmaState.SEND_AW
-        }
-      }
-
-      is(DmaState.SEND_AW) {
-        when(io.m_axi.aw.fire) {
-          activeBurstLen := currentBurstLen
-          wBeatsRemaining := currentBurstLen
-          state := DmaState.READ_CDC_AND_WRITE_W
-        }
-      }
-
-      is(DmaState.READ_CDC_AND_WRITE_W) {
-        when(wFire) {
-          wBeatsRemaining := wBeatsRemaining - 1
-
-          when(wBeatsRemaining === 1) {
-            // Burst finished on W channel
-            val burstBytes = activeBurstLen << config.beatShift
-            val nextDram = curDramAddr + burstBytes
-            val remBeats = beatsLeftInLine - activeBurstLen.resized
-
-            when(remBeats === 0) {
-              // Finished all bursts for current line in tile
-              when(currentLineInTile === (config.tileHeight - 1)) {
-                // All 128 rows of this tile finished!
-                state := DmaState.WAIT_RESP
-              }.otherwise {
-                // Advance to next line within current tile (single register addition)
-                val nextLineIdx = currentLineInTile + 1
-                val nextLineDram = lineStartDramAddr + shadowStride.resized
-
-                currentLineInTile := nextLineIdx
-                curLineIdx := nextLineIdx
-                lineStartDramAddr := nextLineDram
-                curDramAddr := nextLineDram
-                beatsLeftInLine := config.beatsPerRow
-                state := DmaState.SEND_AW
-              }
-            }.otherwise {
-              // More bursts remaining in current line (e.g. split across 4KB boundary)
-              curDramAddr := nextDram
-              beatsLeftInLine := remBeats
-              state := DmaState.SEND_AW
-            }
-          }
-        }
-      }
-
-      is(DmaState.WAIT_RESP) {
-        when(outstandingBursts === 0) {
+    is(DmaState.TRANSFER) {
+      // All bursts issued and every B response received (B implies all W beats sent)
+      when(!planActive && outstandingBursts === 0) {
+        if (config.useAutoAdvance) {
+          // done/BUSY are reported in ADVANCE_CALC_2, together with the new position and frame_done
+          state := DmaState.ADVANCE_CALC_1
+        } else {
           dmaBusy := False
           intrDone := True
-          if (config.useAutoAdvance) {
-            state := DmaState.ADVANCE_CALC_1
-          } else {
-            state := DmaState.IDLE
-          }
-        }
-      }
-
-      if (config.useAutoAdvance) {
-        // ---------------------------------------------------------------------
-        // Multi-Cycle Pipelined 2D Raster Tile Advancing Calculation
-        // Cycle 1: Shift-based row jump (stride is power of 2) & comparator step
-        // ---------------------------------------------------------------------
-        is(DmaState.ADVANCE_CALC_1) {
-          // 128 * stride = stride << 7 (Zero multipliers, pure bit shift)
-          advTileHeightStride := (shadowStride << config.tileHeightShift).resized
-          advStepRightAddr := tileOriginAddr + U(config.bytesPerRow, config.addressWidth bits)
-          advIsLastInRow := (CUR_TILE_X === (shadowTilesX - 1))
-          advIsLastInFrame := (CUR_TILE_X === (shadowTilesX - 1)) && (CUR_TILE_Y === (shadowTilesY - 1))
-          state := DmaState.ADVANCE_CALC_2
-        }
-
-        // ---------------------------------------------------------------------
-        // Cycle 2: Coordinate & address commit step (Zero timing pressure)
-        // ---------------------------------------------------------------------
-        is(DmaState.ADVANCE_CALC_2) {
-          when(advIsLastInFrame) {
-            // Completed entire frame! Wrap around to (0, 0)
-            CUR_TILE_X := 0
-            CUR_TILE_Y := 0
-            tileOriginAddr := fullBaseAddr
-            rowStartTileAddr := fullBaseAddr
-            intrFrameDone := True
-          }.elsewhen(advIsLastInRow) {
-            // Wrap down to the next tile row
-            CUR_TILE_X := 0
-            CUR_TILE_Y := CUR_TILE_Y + 1
-            val nextTileRowOrigin = rowStartTileAddr + advTileHeightStride
-            rowStartTileAddr := nextTileRowOrigin
-            tileOriginAddr := nextTileRowOrigin
-          }.otherwise {
-            // Advance right to next tile in the current row
-            CUR_TILE_X := CUR_TILE_X + 1
-            tileOriginAddr := advStepRightAddr
-          }
-
           state := DmaState.IDLE
         }
+      }
+    }
+
+    if (config.useAutoAdvance) {
+      // ---------------------------------------------------------------------
+      // Multi-Cycle Pipelined 2D Raster Tile Advancing Calculation
+      // Cycle 1: Shift-based row jump & comparator step
+      // ---------------------------------------------------------------------
+      is(DmaState.ADVANCE_CALC_1) {
+        // tileHeight * stride = stride << tileHeightShift (Zero multipliers, pure bit shift)
+        advTileHeightStride := (shadowStride << config.tileHeightShift).resized
+        advStepRightAddr := tileOriginAddr + U(config.bytesPerRow, config.addressWidth bits)
+        advIsLastInRow := (CUR_TILE_X === (shadowTilesX - 1))
+        advIsLastInFrame := (CUR_TILE_X === (shadowTilesX - 1)) && (CUR_TILE_Y === (shadowTilesY - 1))
+        state := DmaState.ADVANCE_CALC_2
+      }
+
+      // ---------------------------------------------------------------------
+      // Cycle 2: Coordinate & address commit step (Zero timing pressure)
+      // ---------------------------------------------------------------------
+      is(DmaState.ADVANCE_CALC_2) {
+        when(advIsLastInFrame) {
+          // Completed entire frame! Wrap around to (0, 0)
+          CUR_TILE_X := 0
+          CUR_TILE_Y := 0
+          tileOriginAddr := fullBaseAddr
+          rowStartTileAddr := fullBaseAddr
+          intrFrameDone := True
+        }.elsewhen(advIsLastInRow) {
+          // Wrap down to the next tile row
+          CUR_TILE_X := 0
+          CUR_TILE_Y := CUR_TILE_Y + 1
+          val nextTileRowOrigin = rowStartTileAddr + advTileHeightStride
+          rowStartTileAddr := nextTileRowOrigin
+          tileOriginAddr := nextTileRowOrigin
+        }.otherwise {
+          // Advance right to next tile in the current row
+          CUR_TILE_X := CUR_TILE_X + 1
+          tileOriginAddr := advStepRightAddr
+        }
+
+        dmaBusy := False
+        intrDone := True
+        state := DmaState.IDLE
       }
     }
   }
@@ -704,10 +800,10 @@ class AxiTileDmaWithRam(
     val irq_error = out Bool ()
     val irq_frame_done = out Bool ()
 
-    // External Write Port into Tiled RAM (Operates in high-frequency ramClock domain)
-    val ram_wr_en = in Bool ()
-    val ram_wr_addr = in UInt (config.ramWordAddrWidth bits)
-    val ram_wr_data = in Bits (config.dataWidth bits)
+    // Per-thread External Write Ports into quad Tiled RAMs (Operate in high-frequency ramClock domain)
+    val ram_wr_en = in Vec (Bool(), config.quadThreads)
+    val ram_wr_addr = in Vec (UInt(config.threadWordAddrWidth bits), config.quadThreads)
+    val ram_wr_data = in Vec (Bits(config.threadDataWidth bits), config.quadThreads)
   }
 
   noIoPrefix()
@@ -739,22 +835,25 @@ class AxiTileDmaWithRam(
   io.irq_error := dma.io.irq_error
   io.irq_frame_done := dma.io.irq_frame_done
 
-  // Dual-Port BRAM in high-frequency ramClock domain
+  // One Dual-Port BRAM per quad thread in high-frequency ramClock domain
   val ramArea = new ClockingArea(ramClock) {
-    val tiledRam = Mem(Bits(config.dataWidth bits), wordCount = config.totalBeats)
+    val tiledRams = for (t <- 0 until config.quadThreads) yield {
+      val tiledRam = Mem(Bits(config.threadDataWidth bits), wordCount = config.threadTotalBeats)
 
-    tiledRam.write(
-      enable = io.ram_wr_en,
-      address = io.ram_wr_addr,
-      data = io.ram_wr_data
-    )
+      tiledRam.write(
+        enable = io.ram_wr_en(t),
+        address = io.ram_wr_addr(t),
+        data = io.ram_wr_data(t)
+      )
 
-    // Convert byte-address back to word address for SpinalHDL simulation Mem
-    val memRead = tiledRam.readSync(
-      enable = dma.io.tile_ram.en,
-      address = (dma.io.tile_ram.addr >> config.beatShift).resized
-    )
-    dma.io.tile_ram.dout := Delay(memRead, cycleCount = config.bramReadLatency - 1)
+      // Convert byte-address back to word address for SpinalHDL simulation Mem
+      val memRead = tiledRam.readSync(
+        enable = dma.io.tile_ram(t).en,
+        address = (dma.io.tile_ram(t).addr >> config.threadBeatShift).resized
+      )
+      dma.io.tile_ram(t).dout := Delay(memRead, cycleCount = config.bramReadLatency - 1)
+      tiledRam
+    }
   }
 }
 
